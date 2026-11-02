@@ -340,8 +340,8 @@ org.soulstone.tps
 | **v0.1.0** ✓ released 2026-11-02 | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), MSL height, demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
 | **v0.2.0** built 2026-11-02, tested on Kara's phone | Starts on its own (no START/STOP), satellite time, geohash, waypoints (paste a list, add where you are) and navigation to them on the ring, heading-up compass as a setting. |
 | **v0.2.1** built 2026-11-02, awaiting the phone test | Kibernetyk Mono everywhere, heading-up by default, a star for the waypoints, a label dialog for Add where I am. |
-| **v0.3.0** | **Everything the chip can do:** CHIP card, "unsupported vs not in view", per-band detail, satellite trails, cold start / TTFF test. |
-| **v0.4.0** (optional) | Raw measurements: signal codes and AGC per band. **Interference watch**, OVERWATCH-family: AGC drops, C/N0 flattening, GNSS clock vs phone clock, position jumps, with honest limits. Research stretch: **one fix per constellation** (GPS-only vs Galileo-only vs BeiDou-only dots from satellite PVT + pseudoranges), so each nation's answer appears next to the fused one. |
+| **v0.3.0** step 1 built 2026-11-02 (0.3.0-dev), awaiting the phone test | **Own fixes, step 1** (§8): CHIP card with the capabilities and live raw-data status, a raw-data recorder (GnssLogger format, shared from the phone), pseudoranges, GPS and Galileo navigation-message decoding, and per-constellation fixes next to the chip's. "Unsupported vs not in view" on the cards. |
+| **v0.4.0** | **Own fixes, step 2:** GLONASS and BeiDou decoding, the "each nation's answer" plot, and the **integrity check** (§8): own fixes vs the chip's, AGC per band, C/N0 flattening, clock and position jumps, with honest limits. Then per-band detail, satellite trails, cold start / TTFF test. |
 | **Later** | tps.netslum.io site, F-Droid submission, GPX/NMEA logging. |
 
 ## 6. Testing
@@ -408,6 +408,48 @@ org.soulstone.tps
     fallbacks in §2.
 11. Location switched off means no `GnssStatus` at all.
 12. An empty `getGnssSignalTypes()` list means unknown, not unsupported.
+
+## 8. Own fixes and integrity (v0.3–v0.4)
+
+**Goal.** TPS computes its own position from the satellites' signals, once per
+constellation (GPS-only, Galileo-only, …) and once for all of them, and shows each next
+to the chip's fused fix. That's the TERRAN idea made literal, *each nation's answer*, and a
+cross-check: a spoofer has to fool every system consistently, and TPS's own solution
+doesn't share the chip's filtering or assistance data.
+
+**What it needs from the phone** (shown on the CHIP card):
+- **Raw measurements** (`GnssMeasurementsEvent`, API 24; capability flag API 31). From
+  `GnssClock` and each `GnssMeasurement`: receive time `TimeNanos − (FullBiasNanos +
+  BiasNanos) + TimeOffsetNanos`, transmit time `ReceivedSvTimeNanos` (time of week; BeiDou
+  is 14 s behind GPS time, GLONASS gives time of day in Moscow time), and their difference
+  × c is the pseudorange. Usable only with the time-of-week (or GLONASS time-of-day)
+  decoded or known, per the `State` bits.
+- **Where each satellite is.** `SatellitePvt` is a system API (not in the public SDK; only
+  `hasSatellitePvt()` is), and TPS has no network for downloaded orbits. So TPS decodes
+  the **broadcast navigation messages** (`GnssNavigationMessage`, API 24): GPS and QZSS
+  L1 C/A subframes 1–3 (with the IS-GPS-200 parity check), Galileo I/NAV word types 1–5
+  (CRC-24Q), then GLONASS strings 1–4 (state vectors, integrated with RK4) and BeiDou D1.
+  Phones that don't deliver navigation messages can't do this offline. A later option is
+  importing a RINEX navigation file from another device, which still needs no network
+  permission.
+- Every decoded orbit is checked against the chip: the satellite's azimuth and elevation
+  computed from it must match `GnssStatus` within a few degrees, or it's dropped.
+
+**The solver.** Iterative weighted least squares on the pseudoranges: position plus a
+clock term per constellation; satellite clock (af0–af2, relativity, group delay), Earth
+rotation during the signal's flight, Klobuchar ionosphere (from GPS subframe 4), a
+standard troposphere, a 10° mask, C/N0 weights. At least 4 satellites per constellation.
+Results: position, offset from the chip's fix (east/north/up), residuals, DOP.
+
+**Integrity (v0.4).** Flags, each with what it can and can't tell you: own fixes far from
+the chip's (beyond their combined uncertainty); constellations disagreeing with each
+other; AGC dropping (API 33) with C/N0 rising or flattening across satellites; GNSS time
+against the phone's network time; jumps in position or clock. Phones are not survey
+receivers: this catches crude spoofing and jamming, not a careful attacker.
+
+**Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
+`Fix`, `Status` lines) to a file shared through Android's share sheet. It's how the
+decoders get checked against real phones. The file contains your position, and TPS says so.
 
 ## Sources
 

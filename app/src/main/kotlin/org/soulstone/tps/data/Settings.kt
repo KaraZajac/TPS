@@ -48,6 +48,10 @@ class Settings private constructor(private val prefs: SharedPreferences) {
     private val _headingUp = MutableStateFlow(prefs.getBoolean(KEY_HEADING_UP, true))
     val headingUp: StateFlow<Boolean> = _headingUp.asStateFlow()
 
+    // Off by default: continuous raw measurements cost battery; duty-cycled ones are enough for own fixes.
+    private val _fullTracking = MutableStateFlow(prefs.getBoolean(KEY_FULL_TRACKING, false))
+    val fullTracking: StateFlow<Boolean> = _fullTracking.asStateFlow()
+
     /** Geohash length shown with the position; 0 hides it. 9 characters is a cell about 5 m across. */
     private val _geohashPrecision = MutableStateFlow(prefs.getInt(KEY_GEOHASH_PRECISION, 9).coerceIn(0, 12))
     val geohashPrecision: StateFlow<Int> = _geohashPrecision.asStateFlow()
@@ -60,6 +64,7 @@ class Settings private constructor(private val prefs: SharedPreferences) {
     fun setKeepScreenOn(v: Boolean) { prefs.edit { putBoolean(KEY_KEEP_SCREEN_ON, v) }; _keepScreenOn.value = v }
     fun setDemoSky(v: Boolean) { prefs.edit { putBoolean(KEY_DEMO_SKY, v) }; _demoSky.value = v }
     fun setHeadingUp(v: Boolean) { prefs.edit { putBoolean(KEY_HEADING_UP, v) }; _headingUp.value = v }
+    fun setFullTracking(v: Boolean) { prefs.edit { putBoolean(KEY_FULL_TRACKING, v) }; _fullTracking.value = v }
     fun setGeohashPrecision(v: Int) {
         val p = v.coerceIn(0, 12)
         prefs.edit { putInt(KEY_GEOHASH_PRECISION, p) }
@@ -77,6 +82,7 @@ class Settings private constructor(private val prefs: SharedPreferences) {
         private const val KEY_DEMO_SKY = "demo_sky"
         private const val KEY_HEADING_UP = "heading_up"
         private const val KEY_GEOHASH_PRECISION = "geohash_precision"
+        private const val KEY_FULL_TRACKING = "full_tracking"
 
         @Volatile private var INSTANCE: Settings? = null
 

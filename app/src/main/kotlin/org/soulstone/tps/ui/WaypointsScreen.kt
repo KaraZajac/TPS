@@ -138,7 +138,7 @@ fun WaypointsScreen(
 
         Spacer(Modifier.height(8.dp))
         Label("Add")
-        Note(
+        Hint(
             "One per line: a label and coordinates or a geohash, in either order. Decimal " +
                 "degrees, degrees-minutes-seconds and geohashes all work. Nothing leaves the phone."
         )
@@ -164,12 +164,12 @@ fun WaypointsScreen(
                 here = fix
             }
         }
-        result?.let { Note(it) }
+        result?.let { Hint(it) }
 
         Spacer(Modifier.height(16.dp))
         Label("Saved (${waypoints.size})")
         if (waypoints.isEmpty()) {
-            Note("No waypoints yet.")
+            Hint("No waypoints yet.")
         }
         for (w in waypoints) {
             val isTarget = w.id == targetId
@@ -370,7 +370,7 @@ private fun Label(text: String) {
 }
 
 @Composable
-private fun Note(text: String) {
+private fun Hint(text: String) {
     Text(
         text = text,
         fontSize = 11.sp,

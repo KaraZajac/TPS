@@ -109,6 +109,7 @@ fun MainScreen(
     waypoints: List<Waypoint>,
     target: Waypoint?,
     compass: CompassView?,
+    raw: RawUi?,
     notice: Notice?,
     onOpenWaypoints: () -> Unit,
     onOpenSettings: () -> Unit
@@ -208,7 +209,7 @@ fun MainScreen(
             sheetState = sheetState,
             containerColor = MaterialTheme.colorScheme.background
         ) {
-            ConstellationsSheet(state, prefs)
+            ConstellationsSheet(state, prefs, raw)
         }
     }
 }

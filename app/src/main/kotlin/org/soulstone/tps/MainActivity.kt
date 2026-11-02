@@ -22,11 +22,13 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import org.soulstone.tps.data.Settings
 import org.soulstone.tps.gnss.GnssEngine
 import org.soulstone.tps.nav.Compass
@@ -35,6 +37,7 @@ import org.soulstone.tps.ui.CompassView
 import org.soulstone.tps.ui.DisplayPrefs
 import org.soulstone.tps.ui.MainScreen
 import org.soulstone.tps.ui.Notice
+import org.soulstone.tps.ui.RawUi
 import org.soulstone.tps.ui.SettingsScreen
 import org.soulstone.tps.ui.WaypointsScreen
 import org.soulstone.tps.ui.theme.TpsTheme
@@ -109,6 +112,9 @@ class MainActivity : ComponentActivity() {
                 val geohash by settings.geohashPrecision.collectAsState()
                 KeepScreenOn(keepOn)
 
+                val fullTracking by settings.fullTracking.collectAsState()
+                LaunchedEffect(fullTracking) { engine.setFullTracking(fullTracking) }
+
                 // The compass runs only in heading-up mode (and onStop stops it).
                 LaunchedEffect(headingUp) { if (headingUp) compass.start() else compass.stop() }
                 SideEffect { state.fix?.let { compass.setPosition(it.latitude, it.longitude, it.altitudeM) } }
@@ -123,12 +129,24 @@ class MainActivity : ComponentActivity() {
                         val headingState = compass.heading.collectAsState()
                         val accuracy by compass.accuracyDeg.collectAsState()
                         val accessNow by access
+                        val recorder by engine.recorderState.collectAsState()
+                        val chip = remember { engine.chipInfo() }
+                        val raw = RawUi(
+                            chip = chip,
+                            recorder = recorder,
+                            fullTracking = fullTracking,
+                            onFullTracking = { settings.setFullTracking(it) },
+                            onRecord = { engine.startRecording(BuildConfig.VERSION_NAME) },
+                            onStopRecording = { engine.stopRecording() },
+                            onShare = ::shareRecording,
+                        )
                         MainScreen(
                             state = state,
                             prefs = DisplayPrefs(units, coordinates, shapes, labels, geohash),
                             waypoints = list,
                             target = list.firstOrNull { it.id == targetId },
                             compass = if (headingUp) CompassView(headingState, accuracy, compass.available) else null,
+                            raw = raw,
                             notice = notice(state, accessNow),
                             onOpenWaypoints = { screen = Screen.WAYPOINTS },
                             onOpenSettings = { screen = Screen.SETTINGS }
@@ -187,6 +205,7 @@ class MainActivity : ComponentActivity() {
     /** Listen in the current mode; on first launch, ask for location first. */
     private fun startListening() {
         val demo = settings.demoSky.value
+        engine.setFullTracking(settings.fullTracking.value)
         engine.start(demo)
         if (!demo && !granted(FINE) && !askedThisLaunch) requestLocation()
     }
@@ -217,6 +236,19 @@ class MainActivity : ComponentActivity() {
             GnssEngine.Status.NO_GNSS -> Notice("This device has no GNSS receiver. Demo sky still works (Settings).")
             GnssEngine.Status.IDLE, GnssEngine.Status.RUNNING -> null
         }
+    }
+
+    /** Hands a raw-data recording to the app the user picks, read-only, through the share sheet. */
+    private fun shareRecording(name: String) {
+        val file = engine.recording(name)
+        if (!file.exists()) return
+        val uri = FileProvider.getUriForFile(this, "$packageName.recordings", file)
+        val send = Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .putExtra(Intent.EXTRA_SUBJECT, name)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        runCatching { startActivity(Intent.createChooser(send, "Share raw GNSS recording")) }
     }
 
     private fun granted(permission: String) =

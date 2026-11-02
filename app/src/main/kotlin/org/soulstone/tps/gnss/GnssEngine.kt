@@ -4,6 +4,9 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.GnssMeasurementRequest
+import android.location.GnssMeasurementsEvent
+import android.location.GnssNavigationMessage
 import android.location.GnssStatus
 import android.location.Location
 import android.location.LocationListener
@@ -29,6 +32,19 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
+import org.soulstone.tps.raw.Agc
+import org.soulstone.tps.raw.ChipInfo
+import org.soulstone.tps.raw.Geodetic
+import org.soulstone.tps.raw.NavMessage
+import org.soulstone.tps.raw.OwnFixEngine
+import org.soulstone.tps.raw.RawClock
+import org.soulstone.tps.raw.RawEpoch
+import org.soulstone.tps.raw.RawMeasurement
+import org.soulstone.tps.raw.RawRecorder
+import org.soulstone.tps.raw.RawState
+import org.soulstone.tps.raw.RawStatus
+import org.soulstone.tps.raw.RecorderState
 
 /**
  * Listens to the phone's GNSS chip, or to [DemoSky], and publishes one [State].
@@ -68,6 +84,7 @@ class GnssEngine private constructor(context: Context) {
         val dopFromChip: Boolean = false,
         val sbasCorrections: Boolean = false,
         val tier: FixTier = FixTier.IDLE,
+        val raw: RawState = RawState(),
     ) {
         val running: Boolean get() = wanted && status == Status.RUNNING
         val fixAgeMs: Long? get() = fix?.let { (nowMs - it.elapsedRealtimeMs).coerceAtLeast(0) }
@@ -82,6 +99,19 @@ class GnssEngine private constructor(context: Context) {
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
+
+    /**
+     * TPS's own fixes. Kept for the whole process: decoding a satellite's orbit from its
+     * broadcast takes 18–30 s, and orbits stay good for hours. GNSS thread only.
+     */
+    private val ownFix = OwnFixEngine()
+
+    /** GNSS thread only. */
+    private val recorder = RawRecorder(File(app.filesDir, "recordings"))
+    private val _recorder = MutableStateFlow(RecorderState())
+    val recorderState: StateFlow<RecorderState> = _recorder.asStateFlow()
+
+    @Volatile private var fullTracking = false
 
     @Volatile private var session = 0
     private var active = false
@@ -102,10 +132,53 @@ class GnssEngine private constructor(context: Context) {
         activate()
     }
 
-    /** Stop listening and forget the session. Main thread. */
+    /** Stop listening and forget the session. A recording in progress is closed. Main thread. */
     fun stop() {
         deactivate()
         _state.value = State()
+        stopRecording()
+    }
+
+    /** What the chip says about itself, for the CHIP card. */
+    fun chipInfo(): ChipInfo = ChipInfo.read(lm)
+
+    /** Asks for continuous raw measurements (API 31+) instead of duty-cycled ones; costs battery. */
+    fun setFullTracking(on: Boolean) {
+        if (fullTracking == on) return
+        fullTracking = on
+        val r = real ?: return
+        lm?.let { m ->
+            runCatching { m.unregisterGnssMeasurementsCallback(r.measurements) }
+            registerMeasurements(m, r)
+        }
+    }
+
+    /** Starts writing raw data to a new file. */
+    fun startRecording(appVersion: String) {
+        handler.post {
+            recorder.start(appVersion)
+            publishRecorder()
+        }
+    }
+
+    /** Closes the file; [done] gets it on the main thread. */
+    fun stopRecording(done: (File?) -> Unit = {}) {
+        handler.post {
+            val f = if (recorder.recording) recorder.stop() else null
+            publishRecorder()
+            scope.launch { done(f) }
+        }
+    }
+
+    fun recording(name: String): File = File(File(app.filesDir, "recordings"), name)
+
+    private fun publishRecorder() {
+        _recorder.value = RecorderState(
+            active = if (recorder.recording) recorder.file?.name else null,
+            startedAtMs = recorder.startedAtMs,
+            lines = recorder.lines,
+            last = recorder.file?.name ?: _recorder.value.last,
+        )
     }
 
     private fun activate() {
@@ -134,6 +207,8 @@ class GnssEngine private constructor(context: Context) {
                 runCatching { m.removeUpdates(r.location) }
                 runCatching { m.unregisterGnssStatusCallback(r.status) }
                 runCatching { m.removeNmeaListener(r.nmea) }
+                runCatching { m.unregisterGnssMeasurementsCallback(r.measurements) }
+                runCatching { m.unregisterGnssNavigationMessageCallback(r.navigation) }
             }
         }
         real = null
@@ -206,15 +281,41 @@ class GnssEngine private constructor(context: Context) {
         real = r
         val on = LocationManagerCompat.isLocationEnabled(m) && m.isProviderEnabled(LocationManager.GPS_PROVIDER)
         update(id) { it.copy(status = if (on) Status.RUNNING else Status.LOCATION_OFF) }
+        // Raw data is optional: a phone without it still gets everything else.
+        registerMeasurements(m, r)
+        val navOk = runCatching { m.registerGnssNavigationMessageCallback(r.navigation, handler) }.getOrDefault(false)
+        if (!navOk) update(id) { it.copy(raw = it.raw.copy(navigation = RawStatus.NOT_SUPPORTED)) }
     }
 
-    private inner class RealSession(private val id: Int) {
+    @SuppressLint("MissingPermission")
+    private fun registerMeasurements(m: LocationManager, r: RealSession) {
+        val ok = runCatching {
+            if (Build.VERSION.SDK_INT >= 31) {
+                val request = GnssMeasurementRequest.Builder().setFullTracking(fullTracking).build()
+                m.registerGnssMeasurementsCallback(request, { handler.post(it) }, r.measurements)
+            } else {
+                m.registerGnssMeasurementsCallback(r.measurements, handler)
+            }
+        }.getOrDefault(false)
+        if (!ok) update(r.id) { it.copy(raw = it.raw.copy(measurements = RawStatus.NOT_SUPPORTED)) }
+    }
+
+    private fun status(code: Int) = when (code) {
+        0 -> RawStatus.NOT_SUPPORTED
+        1 -> RawStatus.READY
+        2 -> RawStatus.LOCATION_DISABLED
+        3 -> RawStatus.NOT_ALLOWED
+        else -> RawStatus.UNKNOWN
+    }
+
+    private inner class RealSession(val id: Int) {
         /** Touched only on the GNSS thread. */
         private val tracker = NmeaTracker()
         private var lastNmeaPushMs = 0L
 
         val location = object : LocationListener {
             override fun onLocationChanged(location: Location) {
+                recorder.fix(location)
                 val fix = toFix(location, tracker.state)
                 update(id) { s ->
                     s.copy(fix = fix, ttff = s.ttff ?: Ttff(fix.elapsedRealtimeMs - s.startedAtMs, fromChip = false))
@@ -237,6 +338,7 @@ class GnssEngine private constructor(context: Context) {
 
         val status = object : GnssStatus.Callback() {
             override fun onSatelliteStatusChanged(status: GnssStatus) {
+                recorder.status(status)
                 val signals = List(status.satelliteCount) { i ->
                     Signal(
                         constellation = Constellation.fromAndroid(status.getConstellationType(i)),
@@ -259,6 +361,64 @@ class GnssEngine private constructor(context: Context) {
             }
         }
 
+        val measurements = object : GnssMeasurementsEvent.Callback() {
+            override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
+                recorder.raw(event)
+                val epoch = toEpoch(event)
+                val s = _state.value
+                val chip = s.fix?.takeIf { s.fixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
+                // Defensive: one odd measurement mustn't take down the GNSS thread.
+                val report = runCatching { ownFix.solve(epoch, chip, s.sky) }.getOrNull()
+                update(id) {
+                    it.copy(
+                        raw = it.raw.copy(
+                            measurements = RawStatus.READY,
+                            epochs = it.raw.epochs + 1,
+                            signals = epoch.measurements.size,
+                            fullTracking = epoch.fullTracking,
+                            agc = epoch.agc,
+                            report = report ?: it.raw.report,
+                        )
+                    )
+                }
+                if (recorder.recording) publishRecorder()
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onStatusChanged(status: Int) {
+                val st = status(status)
+                update(id) { it.copy(raw = it.raw.copy(measurements = if (it.raw.epochs > 0) RawStatus.READY else st)) }
+            }
+        }
+
+        private var navSinceUpdate = 0
+        private var lastNavPushMs = 0L
+
+        val navigation = object : GnssNavigationMessage.Callback() {
+            override fun onGnssNavigationMessageReceived(message: GnssNavigationMessage) {
+                recorder.nav(message)
+                runCatching {
+                    ownFix.accept(
+                        NavMessage(message.type, message.svid, message.messageId, message.submessageId, message.status, message.data)
+                    )
+                }
+                navSinceUpdate++
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastNavPushMs >= 1_000) {
+                    val n = navSinceUpdate
+                    navSinceUpdate = 0
+                    lastNavPushMs = now
+                    update(id) { it.copy(raw = it.raw.copy(navigation = RawStatus.READY, navMessages = it.raw.navMessages + n)) }
+                }
+            }
+
+            @Deprecated("Deprecated in Java")
+            override fun onStatusChanged(status: Int) {
+                val st = status(status)
+                update(id) { it.copy(raw = it.raw.copy(navigation = if (it.raw.navMessages > 0) RawStatus.READY else st)) }
+            }
+        }
+
         /** The last NMEA values published, without timestamps. */
         private var lastPushed: NmeaTracker.State? = null
 
@@ -278,6 +438,50 @@ class GnssEngine private constructor(context: Context) {
     }
 
     private fun NmeaTracker.State.copyWithoutTimes() = copy(fixTypeAtMs = 0, dopAtMs = 0, ggaAtMs = 0)
+
+    private fun toEpoch(e: GnssMeasurementsEvent): RawEpoch {
+        val c = e.clock
+        val clock = RawClock(
+            timeNanos = c.timeNanos,
+            fullBiasNanos = if (c.hasFullBiasNanos()) c.fullBiasNanos else null,
+            biasNanos = if (c.hasBiasNanos()) c.biasNanos else 0.0,
+            biasUncertaintyNanos = if (c.hasBiasUncertaintyNanos()) c.biasUncertaintyNanos else null,
+            driftNanosPerSecond = if (c.hasDriftNanosPerSecond()) c.driftNanosPerSecond else null,
+            driftUncertaintyNanosPerSecond = if (c.hasDriftUncertaintyNanosPerSecond()) c.driftUncertaintyNanosPerSecond else null,
+            timeUncertaintyNanos = if (c.hasTimeUncertaintyNanos()) c.timeUncertaintyNanos else null,
+            discontinuityCount = c.hardwareClockDiscontinuityCount,
+            leapSecond = if (c.hasLeapSecond()) c.leapSecond else null,
+            elapsedRealtimeNanos = if (Build.VERSION.SDK_INT >= 29 && c.hasElapsedRealtimeNanos()) c.elapsedRealtimeNanos else null,
+        )
+        val measurements = e.measurements.map { m ->
+            RawMeasurement(
+                constellation = Constellation.fromAndroid(m.constellationType),
+                svid = m.svid,
+                timeOffsetNanos = m.timeOffsetNanos,
+                state = m.state,
+                receivedSvTimeNanos = m.receivedSvTimeNanos,
+                receivedSvTimeUncertaintyNanos = m.receivedSvTimeUncertaintyNanos,
+                cn0DbHz = m.cn0DbHz,
+                pseudorangeRateMps = m.pseudorangeRateMetersPerSecond,
+                pseudorangeRateUncertaintyMps = m.pseudorangeRateUncertaintyMetersPerSecond,
+                adrState = m.accumulatedDeltaRangeState,
+                adrMeters = m.accumulatedDeltaRangeMeters,
+                adrUncertaintyMeters = m.accumulatedDeltaRangeUncertaintyMeters,
+                carrierHz = if (m.hasCarrierFrequencyHz()) m.carrierFrequencyHz.toDouble() else null,
+                multipath = m.multipathIndicator,
+                snrDb = if (m.hasSnrInDb()) m.snrInDb else null,
+                basebandCn0DbHz = if (Build.VERSION.SDK_INT >= 30 && m.hasBasebandCn0DbHz()) m.basebandCn0DbHz else null,
+                codeType = if (Build.VERSION.SDK_INT >= 29 && m.hasCodeType()) m.codeType else null,
+            )
+        }
+        val agc = if (Build.VERSION.SDK_INT >= 33) {
+            e.gnssAutomaticGainControls.map { Agc(Constellation.fromAndroid(it.constellationType), it.carrierFrequencyHz, it.levelDb) }
+        } else {
+            emptyList()
+        }
+        val full = if (Build.VERSION.SDK_INT >= 34 && e.hasIsFullTracking()) e.isFullTracking else null
+        return RawEpoch(clock, measurements, agc, full)
+    }
 
     /** Runs on the GNSS thread, where AltitudeConverter's blocking first load is fine. */
     private fun toFix(l: Location, nmea: NmeaTracker.State): Fix {

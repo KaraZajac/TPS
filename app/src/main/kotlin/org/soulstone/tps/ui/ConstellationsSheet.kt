@@ -55,7 +55,7 @@ import org.soulstone.tps.ui.theme.monoWidth
  */
 
 @Composable
-internal fun ConstellationsSheet(state: GnssEngine.State, prefs: DisplayPrefs) {
+internal fun ConstellationsSheet(state: GnssEngine.State, prefs: DisplayPrefs, raw: RawUi?) {
     Column(
         modifier = Modifier
             .verticalScroll(rememberScrollState())
@@ -74,10 +74,19 @@ internal fun ConstellationsSheet(state: GnssEngine.State, prefs: DisplayPrefs) {
         }
         Spacer(Modifier.height(8.dp))
         for (summary in state.sky.constellations) {
-            ConstellationCard(summary, prefs.shapes, sbasCorrections = state.sbasCorrections)
+            ConstellationCard(
+                summary, prefs.shapes, sbasCorrections = state.sbasCorrections,
+                supported = raw?.chip?.supported?.let { summary.constellation in it || summary.constellation == Constellation.UNKNOWN },
+            )
             Spacer(Modifier.height(8.dp))
         }
         PositionCard(state, prefs)
+        if (raw != null) {
+            Spacer(Modifier.height(8.dp))
+            OwnFixesCard(state, prefs, raw)
+            Spacer(Modifier.height(8.dp))
+            ChipCard(state, raw)
+        }
         if (state.sky.satellites.any { it.state == SatState.PREDICTED }) {
             Spacer(Modifier.height(8.dp))
             Note(
@@ -90,7 +99,7 @@ internal fun ConstellationsSheet(state: GnssEngine.State, prefs: DisplayPrefs) {
 }
 
 @Composable
-private fun Note(text: String) {
+internal fun Note(text: String) {
     Text(
         text = text,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -100,7 +109,7 @@ private fun Note(text: String) {
 }
 
 @Composable
-private fun ConstellationCard(summary: ConstellationSummary, shapes: Boolean, sbasCorrections: Boolean) {
+private fun ConstellationCard(summary: ConstellationSummary, shapes: Boolean, sbasCorrections: Boolean, supported: Boolean?) {
     val c = summary.constellation
     var expanded by rememberSaveable(c.name) { mutableStateOf(false) }
     val expandable = summary.satellites.size > ROWS_COLLAPSED
@@ -128,7 +137,7 @@ private fun ConstellationCard(summary: ConstellationSummary, shapes: Boolean, sb
             }
             Spacer(Modifier.height(4.dp))
             Text(
-                text = cardHeadline(summary, sbasCorrections),
+                text = cardHeadline(summary, sbasCorrections, supported),
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = 11.sp,
                 fontFamily = KibernetykMono
@@ -172,7 +181,7 @@ private fun StatusMark(summary: ConstellationSummary, shapes: Boolean) {
     }
 }
 
-private fun cardHeadline(s: ConstellationSummary, sbasCorrections: Boolean): String {
+private fun cardHeadline(s: ConstellationSummary, sbasCorrections: Boolean, supported: Boolean?): String {
     val parts = mutableListOf(s.constellation.operator)
     when {
         s.inView > 0 -> {
@@ -182,6 +191,8 @@ private fun cardHeadline(s: ConstellationSummary, sbasCorrections: Boolean): Str
             if (s.predicted > 0) parts += "${s.predicted} not tracked"
         }
         s.predicted > 0 -> parts += "none received · ${s.predicted} not tracked"
+        // Only when the chip lists its signals (API 34+) can TPS tell the two apart.
+        supported == false -> parts += "not supported by this phone"
         else -> parts += "none in view"
     }
     if (s.constellation == Constellation.SBAS && sbasCorrections) parts += "corrections in use"
@@ -341,7 +352,7 @@ private fun mslSourceText(source: MslSource): String = when (source) {
 }
 
 @Composable
-private fun KeyValue(key: String, value: String) {
+internal fun KeyValue(key: String, value: String) {
     Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
         Text(
             text = key,
