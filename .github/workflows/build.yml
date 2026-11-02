@@ -1,0 +1,73 @@
+name: Build
+
+# Every push and pull request: unit tests, the debug APK, and a check that the
+# APK asks for location and nothing else. A v* tag also publishes a GitHub
+# Release with the APK attached.
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # packages: '' is load-bearing. The action's default is
+      # "tools platform-tools", but Google removed the obsolete `tools` package
+      # from the SDK repository, so sdkmanager fails on it (broke 2026-09-17,
+      # see OVERWATCH). AGP downloads the platform and build-tools it needs;
+      # this step only provides sdkmanager and accepts licenses. Pinned to v3:
+      # v4 insists on its own cmdline-tools and then fails license auto-accept.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+
+      - name: Unit tests and debug APK
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace --no-daemon
+
+      - name: Upload test reports
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-reports
+          path: app/build/reports/tests/
+
+      - name: Check permissions (location only, no network)
+        run: bash scripts/check-permissions.sh app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Stage APK
+        run: |
+          mkdir -p out
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then NAME="$GITHUB_REF_NAME"; else NAME="${GITHUB_SHA::7}"; fi
+          cp app/build/outputs/apk/debug/app-debug.apk "out/TPS-${NAME}.apk"
+
+      # Uploaded on every run so a build can be tried without cutting a release.
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: tps-apk
+          path: out/*.apk
+
+      # Only tag pushes (v*) create a GitHub Release with the APK attached.
+      - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: out/*.apk
+          generate_release_notes: true

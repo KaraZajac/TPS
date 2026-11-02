@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Sky plot: a night-sky disc with the 30° and 60° elevation rings, a green
+     fix-quality ring at the horizon, satellites from four constellations in
+     their TPS colours and shapes, and you at the centre. Drawn on top of the
+     @color/bg_dark adaptive background. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- sky disc -->
+    <path android:pathData="M54,54 m-30,0 a30,30 0 1,0 60,0 a30,30 0 1,0 -60,0">
+        <aapt:attr name="android:fillColor">
+            <gradient android:type="radial"
+                android:centerX="54" android:centerY="54" android:gradientRadius="30">
+                <item android:offset="0.0" android:color="#1B2533" />
+                <item android:offset="1.0" android:color="#10161F" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 60° and 30° elevation rings, crosshair -->
+    <path
+        android:pathData="M54,54 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0"
+        android:strokeColor="#3A4658"
+        android:strokeWidth="1.2" />
+    <path
+        android:pathData="M54,54 m-20,0 a20,20 0 1,0 40,0 a20,20 0 1,0 -40,0"
+        android:strokeColor="#3A4658"
+        android:strokeWidth="1.2" />
+    <path
+        android:pathData="M24,54 L84,54 M54,24 L54,84"
+        android:strokeColor="#3A4658"
+        android:strokeWidth="1" />
+
+    <!-- horizon: the fix-quality ring, green = good fix -->
+    <path
+        android:pathData="M54,54 m-31,0 a31,31 0 1,0 62,0 a31,31 0 1,0 -62,0"
+        android:strokeColor="#1FAA59"
+        android:strokeWidth="3" />
+
+    <!-- GPS (blue circle, dual-frequency ring) -->
+    <path
+        android:pathData="M66,40 m-6.2,0 a6.2,6.2 0 1,0 12.4,0 a6.2,6.2 0 1,0 -12.4,0"
+        android:strokeColor="#2196F3"
+        android:strokeAlpha="0.8"
+        android:strokeWidth="0.9" />
+    <path
+        android:pathData="M66,40 m-4,0 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:fillColor="#2196F3" />
+    <!-- GPS, tracked but not used (hollow) -->
+    <path
+        android:pathData="M74,53 m-2.8,0 a2.8,2.8 0 1,0 5.6,0 a2.8,2.8 0 1,0 -5.6,0"
+        android:strokeColor="#2196F3"
+        android:strokeWidth="1.4" />
+    <!-- Galileo (gold triangle) -->
+    <path
+        android:pathData="M41.5,41 L46,49.2 L37,49.2 Z"
+        android:fillColor="#F4C20D" />
+    <!-- GLONASS (red square) -->
+    <path
+        android:pathData="M60.8,62.8 h6.4 v6.4 h-6.4 Z"
+        android:fillColor="#E5484D" />
+    <!-- BeiDou (violet diamond) -->
+    <path
+        android:pathData="M43,59.2 L47.8,64 L43,68.8 L38.2,64 Z"
+        android:fillColor="#9D7BFF" />
+
+    <!-- you -->
+    <path
+        android:pathData="M54,54 m-2.2,0 a2.2,2.2 0 1,0 4.4,0 a2.2,2.2 0 1,0 -4.4,0"
+        android:fillColor="#F4F6FA" />
+</vector>

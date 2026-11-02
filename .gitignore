@@ -1,0 +1,22 @@
+.DS_Store
+*.log
+.env
+.env.local
+.env.*.local
+
+.idea/
+.vscode/
+__pycache__/
+*.pyc
+
+# Android / Gradle
+.gradle/
+.kotlin/
+local.properties
+*.iml
+.cxx/
+captures/
+app/build/
+app/release/
+**/build/
+**/release/
