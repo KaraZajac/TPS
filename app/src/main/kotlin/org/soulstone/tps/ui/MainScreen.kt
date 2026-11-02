@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.os.Build
+import android.os.SystemClock
+import android.text.format.DateFormat
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,13 +28,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -41,13 +40,17 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -55,26 +58,26 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import java.time.ZoneId
+import kotlin.math.max
 import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 import org.soulstone.tps.R
 import org.soulstone.tps.data.Settings
 import org.soulstone.tps.gnss.Constellation
-import org.soulstone.tps.gnss.ConstellationSummary
+import org.soulstone.tps.gnss.Fix
 import org.soulstone.tps.gnss.FixType
 import org.soulstone.tps.gnss.FrequencyMode
 import org.soulstone.tps.gnss.GnssEngine
 import org.soulstone.tps.gnss.MarkShape
-import org.soulstone.tps.gnss.MslSource
-import org.soulstone.tps.gnss.SatState
-import org.soulstone.tps.gnss.Satellite
+import org.soulstone.tps.nav.Geodesy
+import org.soulstone.tps.nav.Geohash
+import org.soulstone.tps.nav.Waypoint
 import org.soulstone.tps.ui.theme.FixColors
 import org.soulstone.tps.ui.theme.color
-import org.soulstone.tps.ui.theme.ringColor
 
 /** The display preferences the main screen needs, as one snapshot. */
 data class DisplayPrefs(
@@ -82,22 +85,49 @@ data class DisplayPrefs(
     val coordinates: Settings.CoordinateFormat,
     val shapes: Boolean,
     val labels: Boolean,
+    /** 0 hides the geohash. */
+    val geohashPrecision: Int,
 )
 
-/** A line under START/STOP, with an optional button (open settings, turn on location). */
+/** Heading-up mode, for the main screen. [heading] is read only while drawing the circle. */
+data class CompassView(val heading: State<Float?>, val accuracyDeg: Float?, val available: Boolean)
+
+/** A line at the bottom of the screen, with an optional button (allow location, open settings). */
 data class Notice(val text: String, val action: String? = null, val onAction: () -> Unit = {})
 
+/**
+ * The one screen: the sky circle with its fix ring, then the position, the fix, the
+ * time from the satellites and, when navigating, the way to the target. It starts
+ * listening as soon as TPS is on screen; there is no START button.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     state: GnssEngine.State,
     prefs: DisplayPrefs,
+    waypoints: List<Waypoint>,
+    target: Waypoint?,
+    compass: CompassView?,
     notice: Notice?,
-    onStartStop: () -> Unit,
+    onOpenWaypoints: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
     var showSheet by rememberSaveable { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val fix = state.fix
+    val markers = remember(fix?.latitude, fix?.longitude, fix?.accuracyM, waypoints, target) {
+        if (fix == null) {
+            emptyList()
+        } else {
+            // A waypoint you're standing on has no direction, so it gets no marker.
+            waypoints.filter { !arrived(fix, it) }.map {
+                RingMarker(
+                    Geodesy.bearingDeg(fix.latitude, fix.longitude, it.latitude, it.longitude).toFloat(),
+                    target = it.id == target?.id
+                )
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -108,94 +138,67 @@ fun MainScreen(
             .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(horizontal = 24.dp)
     ) {
-        Header(demo = state.wanted && state.demo, onOpenSettings = onOpenSettings)
+        Header(onOpenWaypoints = onOpenWaypoints, onOpenSettings = onOpenSettings)
 
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
         ) {
-            // The circle gives way first on a short screen; the readouts below it don't.
-            val circle = minOf(300.dp, maxWidth, maxHeight - 250.dp).coerceAtLeast(180.dp)
-            val topGap = if (maxHeight > 600.dp) 28.dp else 12.dp
+            // The circle gives way first on a short screen; the readouts below it don't,
+            // and navigating adds one.
+            val reserve = if (target != null) 420.dp else 330.dp
+            val circle = minOf(360.dp, maxWidth, maxHeight - reserve).coerceAtLeast(220.dp)
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .verticalScroll(rememberScrollState()),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Spacer(Modifier.height(topGap))
-                SkyCircle(
-                    state = state,
-                    shapes = prefs.shapes,
-                    labels = prefs.labels,
-                    onTap = { showSheet = true },
-                    modifier = Modifier.size(circle)
-                )
-                Spacer(Modifier.height(10.dp))
+                Spacer(Modifier.height(4.dp))
+                Box(Modifier.size(circle)) {
+                    SkyCircle(
+                        state = state,
+                        shapes = prefs.shapes,
+                        labels = prefs.labels,
+                        heading = compass?.heading,
+                        markers = markers,
+                        onTap = { showSheet = true },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    if (state.wanted && state.demo) DemoBadge(Modifier.align(Alignment.TopStart))
+                }
+                Spacer(Modifier.height(6.dp))
                 Legend(state, prefs.shapes)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = "tap circle for constellation details",
+                    text = hint(compass),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = FontFamily.Monospace,
+                    textAlign = TextAlign.Center
                 )
-                Spacer(Modifier.height(18.dp))
-                PositionReadout(state, prefs)
+                if (target != null) {
+                    // Right under the circle: while navigating, it's what you look for.
+                    Spacer(Modifier.height(14.dp))
+                    TargetReadout(target, fix, state.fixValid, prefs.units, onClick = onOpenWaypoints)
+                }
                 Spacer(Modifier.height(16.dp))
+                PositionReadout(state, prefs)
+                Spacer(Modifier.height(14.dp))
                 FixSummary(state)
+                if (fix != null) {
+                    Spacer(Modifier.height(14.dp))
+                    SatelliteClock(fix)
+                }
                 Spacer(Modifier.height(12.dp))
             }
         }
 
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Button(
-                onClick = onStartStop,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (state.wanted) FixColors.Red else FixColors.Green,
-                    contentColor = Color.White
-                ),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(64.dp)
-            ) {
-                Text(
-                    text = if (state.wanted) "STOP" else "START",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-            }
-            if (notice != null) {
-                Spacer(Modifier.height(12.dp))
-                Text(
-                    text = notice.text,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center
-                )
-                if (notice.action != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Button(
-                        onClick = notice.onAction,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-                            contentColor = MaterialTheme.colorScheme.onSurface
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(notice.action, fontSize = 14.sp, fontFamily = FontFamily.Monospace)
-                    }
-                }
-            }
+        if (notice != null) {
+            NoticeArea(notice)
+            Spacer(Modifier.height(16.dp))
         }
-        Spacer(Modifier.height(24.dp))
     }
 
     if (showSheet) {
@@ -209,25 +212,31 @@ fun MainScreen(
     }
 }
 
+private fun hint(compass: CompassView?): String = when {
+    compass == null -> "tap circle for constellation details"
+    !compass.available -> "no compass sensor: north stays up"
+    compass.accuracyDeg != null && compass.accuracyDeg > 30f ->
+        "compass ±${compass.accuracyDeg.roundToInt()}°: wave the phone in a figure 8"
+    compass.accuracyDeg != null -> "heading up · compass ±${compass.accuracyDeg.roundToInt()}° · tap for details"
+    else -> "heading up · tap circle for details"
+}
+
 @Composable
-private fun Header(demo: Boolean, onOpenSettings: () -> Unit) {
+private fun Header(onOpenWaypoints: () -> Unit, onOpenSettings: () -> Unit) {
     // A Box (not a Row) so the title is truly centred whatever sits beside it.
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 8.dp)
     ) {
-        if (demo) {
-            Text(
-                text = "DEMO",
-                color = FixColors.Orange,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .border(1.dp, FixColors.Orange, RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+        IconButton(
+            onClick = onOpenWaypoints,
+            modifier = Modifier.align(Alignment.CenterStart)
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_flag),
+                contentDescription = "Waypoints",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
         Text(
@@ -250,6 +259,20 @@ private fun Header(demo: Boolean, onOpenSettings: () -> Unit) {
             )
         }
     }
+}
+
+@Composable
+private fun DemoBadge(modifier: Modifier) {
+    Text(
+        text = "DEMO",
+        color = FixColors.Orange,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Bold,
+        fontFamily = FontFamily.Monospace,
+        modifier = modifier
+            .border(1.dp, FixColors.Orange, RoundedCornerShape(4.dp))
+            .padding(horizontal = 6.dp, vertical = 2.dp)
+    )
 }
 
 /** The constellations in view right now; all seven, dimmed, before any are. */
@@ -284,6 +307,18 @@ private fun Legend(state: GnssEngine.State, shapes: Boolean) {
     }
 }
 
+/** A small grey label on the left and a value on the right, above a readout. */
+@Composable
+private fun ReadoutHeader(label: String, value: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        Text(value, color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    }
+}
+
 @Composable
 private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
     val context = LocalContext.current
@@ -295,73 +330,66 @@ private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
             .padding(horizontal = 16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text("position", color = muted, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-            val accuracy = fix?.accuracyM?.takeIf { state.fixValid }
-            Text(
-                text = accuracy?.let { "±" + Format.distance(it.toDouble(), prefs.units) } ?: "",
-                color = MaterialTheme.colorScheme.onBackground,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace
-            )
-        }
+        val accuracy = fix?.accuracyM?.takeIf { state.fixValid }
+        ReadoutHeader("position", accuracy?.let { "±" + Format.distance(it.toDouble(), prefs.units) } ?: "")
         Spacer(Modifier.height(6.dp))
-        when {
-            !state.wanted -> Text(
-                text = "Idle — press START to listen for satellites",
-                color = muted,
-                fontSize = 14.sp,
-                fontFamily = FontFamily.Monospace,
-                textAlign = TextAlign.Center
-            )
-            fix == null -> Text(
+        if (fix == null) {
+            Text(
                 text = if (state.running) "no fix yet" else "—",
                 color = muted,
                 fontSize = 18.sp,
                 fontFamily = FontFamily.Monospace
             )
-            else -> {
-                val coordinates = when (prefs.coordinates) {
-                    Settings.CoordinateFormat.DECIMAL -> Format.latLonDecimal(fix.latitude, fix.longitude)
-                    Settings.CoordinateFormat.DMS -> Format.latLonDms(fix.latitude, fix.longitude)
-                }
-                FitText(
-                    text = coordinates,
-                    maxSize = 20.sp,
-                    color = if (state.fixValid) MaterialTheme.colorScheme.onBackground else muted,
-                    modifier = Modifier.clickable { copyPosition(context, coordinates) }
-                )
-                Spacer(Modifier.height(6.dp))
-                val parts = if (state.fixValid) {
-                    listOfNotNull(
-                        heightText(fix.mslAltitudeM, fix.altitudeM, prefs.units),
-                        fix.speedMps?.let { Format.speed(it.toDouble(), prefs.units) },
-                        "WGS 84"
-                    )
-                } else {
-                    listOf("last fix ${Format.duration(state.fixAgeMs ?: 0)} ago")
-                }
-                Text(
-                    text = parts.joinToString("  •  "),
-                    color = muted,
-                    fontSize = 12.sp,
-                    fontFamily = FontFamily.Monospace,
-                    textAlign = TextAlign.Center
-                )
-                if (fix.mock) {
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "mock location: another app is supplying this position",
-                        color = FixColors.Orange,
-                        fontSize = 11.sp,
-                        fontFamily = FontFamily.Monospace,
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
+            return@Column
+        }
+        val textColor = if (state.fixValid) MaterialTheme.colorScheme.onBackground else muted
+        val coordinates = when (prefs.coordinates) {
+            Settings.CoordinateFormat.DECIMAL -> Format.latLonDecimal(fix.latitude, fix.longitude)
+            Settings.CoordinateFormat.DMS -> Format.latLonDms(fix.latitude, fix.longitude)
+        }
+        FitText(
+            text = coordinates,
+            maxSize = 20.sp,
+            color = textColor,
+            modifier = Modifier.clickable { copy(context, "position", coordinates) }
+        )
+        if (prefs.geohashPrecision > 0) {
+            val hash = Geohash.encode(fix.latitude, fix.longitude, prefs.geohashPrecision)
+            Spacer(Modifier.height(2.dp))
+            Text(
+                text = "geohash $hash",
+                color = textColor,
+                fontSize = 15.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.clickable { copy(context, "geohash", hash) }
+            )
+        }
+        Spacer(Modifier.height(6.dp))
+        val parts = if (state.fixValid) {
+            listOfNotNull(
+                heightText(fix.mslAltitudeM, fix.altitudeM, prefs.units),
+                fix.speedMps?.let { Format.speed(it.toDouble(), prefs.units) },
+                "WGS 84"
+            )
+        } else {
+            listOf("last fix ${Format.duration(state.fixAgeMs ?: 0)} ago")
+        }
+        Text(
+            text = parts.joinToString("  •  "),
+            color = muted,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center
+        )
+        if (fix.mock) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "mock location: another app is supplying this position",
+                color = FixColors.Orange,
+                fontSize = 11.sp,
+                fontFamily = FontFamily.Monospace,
+                textAlign = TextAlign.Center
+            )
         }
     }
 }
@@ -372,11 +400,11 @@ private fun heightText(msl: Double?, ellipsoid: Double?, units: Settings.Units):
     else -> null
 }
 
-private fun copyPosition(context: Context, text: String) {
+private fun copy(context: Context, what: String, text: String) {
     val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return
-    clipboard.setPrimaryClip(ClipData.newPlainText("position", text))
+    clipboard.setPrimaryClip(ClipData.newPlainText(what, text))
     // Android 13+ shows its own confirmation for clipboard writes.
-    if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Position copied", Toast.LENGTH_SHORT).show()
+    if (Build.VERSION.SDK_INT < 33) Toast.makeText(context, "Copied $what", Toast.LENGTH_SHORT).show()
 }
 
 @Composable
@@ -416,10 +444,134 @@ private fun FixSummary(state: GnssEngine.State) {
     }
 }
 
-private fun fixTypeText(type: FixType?): String = when (type) {
+internal fun fixTypeText(type: FixType?): String = when (type) {
     FixType.TWO_D -> "2D"
     FixType.THREE_D -> "3D"
     FixType.NO_FIX, null -> "no"
+}
+
+/**
+ * The time from the satellites: each fix carries UTC from GNSS, and between fixes the
+ * phone's monotonic clock carries it forward, so it stays right even after the fix is
+ * lost. The phone's own clock is shown against it. Ticks on its own, once a second, so
+ * only this readout recomposes.
+ */
+@Composable
+private fun SatelliteClock(fix: Fix) {
+    val context = LocalContext.current
+    val is24Hour = remember { DateFormat.is24HourFormat(context) }
+    val zone = remember { ZoneId.systemDefault() }
+    val latest by rememberUpdatedState(fix)
+    var nowElapsed by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val f = latest
+            val gnss = f.gnssTimeMs + (SystemClock.elapsedRealtime() - f.elapsedRealtimeMs)
+            // Wake just after the next whole second of satellite time.
+            delay(1_000 - Math.floorMod(gnss, 1_000L) + 5)
+            nowElapsed = SystemClock.elapsedRealtime()
+        }
+    }
+    val gnssNow = fix.gnssTimeMs + (nowElapsed - fix.elapsedRealtimeMs)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        ReadoutHeader("satellite time", fix.clockOffsetMs?.let { "phone " + Format.signedSeconds(it) } ?: "")
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = Format.localClock(gnssNow, zone, is24Hour),
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 18.sp,
+            fontFamily = FontFamily.Monospace
+        )
+        Text(
+            text = Format.utcTime(gnssNow) + "  •  " + Format.date(gnssNow, zone),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace
+        )
+    }
+}
+
+/** Where the target is from here. Tapping it opens the waypoint list. */
+@Composable
+private fun TargetReadout(target: Waypoint, fix: Fix?, fixValid: Boolean, units: Settings.Units, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        ReadoutHeader("navigating to", "")
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "▲ " + target.label,
+            color = MaterialTheme.colorScheme.onBackground,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center
+        )
+        val line = if (fix == null) {
+            "waiting for a fix"
+        } else {
+            val d = Geodesy.distanceMeters(fix.latitude, fix.longitude, target.latitude, target.longitude)
+            val b = Geodesy.bearingDeg(fix.latitude, fix.longitude, target.latitude, target.longitude)
+            if (arrived(fix, target)) {
+                "you're there (${Format.longDistance(d, units)})"
+            } else {
+                Format.longDistance(d, units) + "  •  " + Format.bearing(b) + " " + Geodesy.compassPoint(b) +
+                    if (fixValid) "" else "  •  from last fix"
+            }
+        }
+        Text(
+            text = line,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+/** "There": within the fix's own uncertainty, and never closer than 8 m. */
+private fun arrived(fix: Fix, w: Waypoint): Boolean =
+    Geodesy.distanceMeters(fix.latitude, fix.longitude, w.latitude, w.longitude) <=
+        max(8.0, (fix.accuracyM ?: 0f).toDouble())
+
+@Composable
+private fun NoticeArea(notice: Notice) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Text(
+            text = notice.text,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 13.sp,
+            textAlign = TextAlign.Center
+        )
+        if (notice.action != null) {
+            Spacer(Modifier.height(8.dp))
+            Button(
+                onClick = notice.onAction,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = FixColors.Green,
+                    contentColor = Color.White
+                ),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+            ) {
+                Text(notice.action, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            }
+        }
+    }
 }
 
 /** Single-line monospace text that shrinks to fit its width (long DMS coordinates). */
@@ -436,309 +588,6 @@ private fun FitText(text: String, maxSize: TextUnit, color: Color, modifier: Mod
             fontFamily = FontFamily.Monospace,
             maxLines = 1,
             softWrap = false
-        )
-    }
-}
-
-// ------------------------------------------------------------------ the sheet
-
-@Composable
-private fun ConstellationsSheet(state: GnssEngine.State, prefs: DisplayPrefs) {
-    Column(
-        modifier = Modifier
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 24.dp, vertical = 8.dp)
-    ) {
-        Text(
-            text = "Constellations",
-            color = MaterialTheme.colorScheme.onBackground,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace
-        )
-        if (state.wanted && state.demo) {
-            Spacer(Modifier.height(4.dp))
-            Note("Demo sky: simulated satellites over Singapore. Turn it off in Settings.")
-        }
-        Spacer(Modifier.height(8.dp))
-        for (summary in state.sky.constellations) {
-            ConstellationCard(summary, prefs.shapes, sbasCorrections = state.sbasCorrections)
-            Spacer(Modifier.height(8.dp))
-        }
-        PositionCard(state, prefs)
-        if (state.sky.satellites.any { it.state == SatState.PREDICTED }) {
-            Spacer(Modifier.height(8.dp))
-            Note(
-                "Not tracked: the chip lists the satellite from its almanac, but isn't " +
-                    "receiving it (C/N0 0). Not counted as in view."
-            )
-        }
-        Spacer(Modifier.height(16.dp))
-    }
-}
-
-@Composable
-private fun Note(text: String) {
-    Text(
-        text = text,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontSize = 11.sp,
-        fontFamily = FontFamily.Monospace
-    )
-}
-
-@Composable
-private fun ConstellationCard(summary: ConstellationSummary, shapes: Boolean, sbasCorrections: Boolean) {
-    val c = summary.constellation
-    var expanded by rememberSaveable(c.name) { mutableStateOf(false) }
-    val expandable = summary.satellites.size > ROWS_COLLAPSED
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(enabled = expandable) { expanded = !expanded },
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp)
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = c.cardName,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-                StatusMark(summary, shapes)
-            }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = cardHeadline(summary, sbasCorrections),
-                color = MaterialTheme.colorScheme.onSurface,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace
-            )
-            if (summary.satellites.isNotEmpty()) {
-                Spacer(Modifier.height(4.dp))
-                val rows = if (expanded) summary.satellites else summary.satellites.take(ROWS_COLLAPSED)
-                rows.forEach { SatelliteRow(it) }
-                if (expandable) {
-                    Text(
-                        text = if (expanded) "show less" else "+${summary.satellites.size - ROWS_COLLAPSED} more",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 11.sp
-                    )
-                }
-            }
-        }
-    }
-}
-
-private const val ROWS_COLLAPSED = 3
-
-/** The constellation's colour if it's in the fix, grey if only tracked, an empty ring if not in view. */
-@Composable
-private fun StatusMark(summary: ConstellationSummary, shapes: Boolean) {
-    val grey = MaterialTheme.colorScheme.onSurfaceVariant
-    when {
-        summary.used > 0 -> MarkSwatch(
-            if (shapes) summary.constellation.shape else MarkShape.CIRCLE,
-            summary.constellation.color, 11.dp
-        )
-        summary.inView > 0 -> MarkSwatch(
-            if (shapes) summary.constellation.shape else MarkShape.CIRCLE, grey, 11.dp
-        )
-        else -> Box(
-            Modifier
-                .size(10.dp)
-                .clip(CircleShape)
-                .border(1.5.dp, grey, CircleShape)
-        )
-    }
-}
-
-private fun cardHeadline(s: ConstellationSummary, sbasCorrections: Boolean): String {
-    val parts = mutableListOf(s.constellation.operator)
-    when {
-        s.inView > 0 -> {
-            parts += "${s.inView} in view"
-            parts += "${s.used} used"
-            if (s.bands.isNotEmpty()) parts += s.bands.joinToString(" ")
-            if (s.predicted > 0) parts += "${s.predicted} not tracked"
-        }
-        s.predicted > 0 -> parts += "none received · ${s.predicted} not tracked"
-        else -> parts += "none in view"
-    }
-    if (s.constellation == Constellation.SBAS && sbasCorrections) parts += "corrections in use"
-    // Non-breaking spaces inside each part, so a long line wraps only between parts.
-    return parts.joinToString(" · ") { it.replace(' ', '\u00A0') }
-}
-
-@Composable
-private fun SatelliteRow(s: Satellite) {
-    val base = MaterialTheme.colorScheme.onSurfaceVariant
-    val color = if (s.state == SatState.PREDICTED) base.copy(alpha = 0.55f) else base
-    val position = if (s.positionKnown) {
-        "el ${Format.degrees(s.elevationDeg.toDouble())} az ${Format.degrees(s.azimuthDeg.toDouble())}"
-    } else {
-        "position unknown"
-    }
-    val signal = if (s.state == SatState.PREDICTED) "no signal" else "${s.cn0DbHz.roundToInt()} dB-Hz"
-    val status = when {
-        s.sbasSystem != null -> s.sbasSystem + if (s.state == SatState.USED) " used" else ""
-        s.state == SatState.USED -> "used"
-        else -> ""
-    }
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Cell(s.label, 44.dp, color)
-        Cell(signal, 66.dp, color)
-        Cell(position, 104.dp, color)
-        Text(
-            text = listOf(s.bands.joinToString("+"), status).filter { it.isNotEmpty() }.joinToString("  "),
-            color = color,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            maxLines = 1,
-            softWrap = false,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f)
-        )
-    }
-}
-
-@Composable
-private fun Cell(text: String, width: Dp, color: Color) {
-    Text(
-        text = text,
-        color = color,
-        fontSize = 11.sp,
-        fontFamily = FontFamily.Monospace,
-        maxLines = 1,
-        softWrap = false,
-        overflow = TextOverflow.Clip,
-        modifier = Modifier.width(width)
-    )
-}
-
-@Composable
-private fun PositionCard(state: GnssEngine.State, prefs: DisplayPrefs) {
-    val fix = state.fix
-    val units = prefs.units
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(8.dp)
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "POSITION",
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
-                Box(
-                    Modifier
-                        .size(10.dp)
-                        .clip(CircleShape)
-                        .background(state.tier.ringColor(MaterialTheme.colorScheme.surfaceVariant))
-                )
-            }
-            Spacer(Modifier.height(6.dp))
-            if (fix == null) {
-                Note(if (state.running) "no fix yet" else "press START to listen for satellites")
-                return@Column
-            }
-            KeyValue("decimal", Format.latLonDecimal(fix.latitude, fix.longitude))
-            KeyValue("DMS", Format.latLonDms(fix.latitude, fix.longitude))
-            val heights = listOfNotNull(
-                fix.altitudeM?.let { Format.heightPrecise(it, units) + " ellipsoid" },
-                fix.mslAltitudeM?.let { Format.heightPrecise(it, units) + " MSL" }
-            )
-            KeyValue("height", heights.joinToString(" · ").ifEmpty { "—" })
-            fix.mslSource?.let { KeyValue("MSL from", mslSourceText(it)) }
-            KeyValue(
-                "accuracy",
-                listOfNotNull(
-                    fix.accuracyM?.let { "±" + Format.distance(it.toDouble(), units) + " horiz." },
-                    fix.verticalAccuracyM?.let { "±" + Format.distance(it.toDouble(), units) + " vert." }
-                ).joinToString(" · ").ifEmpty { "—" }
-            )
-            KeyValue(
-                "speed",
-                fix.speedMps?.let { s ->
-                    Format.speed(s.toDouble(), units) +
-                        (fix.speedAccuracyMps?.let { " ±" + Format.speed(it.toDouble(), units) } ?: "")
-                } ?: "—"
-            )
-            KeyValue(
-                "bearing",
-                fix.bearingDeg?.let { b ->
-                    Format.degrees(b.toDouble()) + (fix.bearingAccuracyDeg?.let { " ±" + Format.degrees(it.toDouble()) } ?: "")
-                } ?: "—"
-            )
-            KeyValue(
-                "fix",
-                if (state.fixValid) {
-                    "${fixTypeText(state.fixType)} · ${state.sky.used} of ${state.sky.inView} satellites" +
-                        if (state.fixTypeFromChip) "" else " (2D/3D inferred)"
-                } else {
-                    "lost ${Format.duration(state.fixAgeMs ?: 0)} ago"
-                }
-            )
-            state.dop?.let { d ->
-                KeyValue(
-                    "DOP",
-                    "P ${Format.dop(d.pdop)} · H ${Format.dop(d.hdop)} · V ${Format.dop(d.vdop)}" +
-                        if (state.dopFromChip) " (chip)" else " (from geometry)"
-                )
-            }
-            state.ttff?.let {
-                KeyValue(
-                    "TTFF",
-                    if (it.fromChip) Format.duration(it.millis) + " (chip)"
-                    else "first fix ${Format.duration(it.millis)} after START"
-                )
-            }
-            KeyValue("GNSS time", Format.utcTime(fix.gnssTimeMs))
-            fix.clockOffsetMs?.let { KeyValue("phone clock", Format.signedSeconds(it) + " vs GNSS") }
-            KeyValue("fix age", Format.duration(state.fixAgeMs ?: 0))
-            if (fix.mock) KeyValue("source", "mock location (another app)")
-        }
-    }
-}
-
-private fun mslSourceText(source: MslSource): String = when (source) {
-    MslSource.PLATFORM -> "Android"
-    MslSource.CONVERTER -> "Android's geoid model"
-    MslSource.NMEA -> "chip's geoid (NMEA)"
-    MslSource.DEMO -> "demo"
-}
-
-@Composable
-private fun KeyValue(key: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
-        Text(
-            text = key,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.width(100.dp)
-        )
-        Text(
-            text = value,
-            color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.weight(1f)
         )
     }
 }

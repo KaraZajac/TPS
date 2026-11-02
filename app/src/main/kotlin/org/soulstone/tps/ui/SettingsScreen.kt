@@ -44,6 +44,15 @@ import org.soulstone.tps.data.Settings
 
 private const val SOURCE_URL = "https://github.com/KaraZajac/TPS"
 
+/** Geohash lengths offered, with each cell's size near the equator. */
+private val GEOHASH_CHOICES = listOf(
+    0 to "None",
+    7 to "7 characters · about 150 m",
+    8 to "8 characters · about 38 × 19 m",
+    9 to "9 characters · about 5 m",
+    10 to "10 characters · about 1 m",
+)
+
 @Composable
 fun SettingsScreen(
     settings: Settings,
@@ -57,6 +66,8 @@ fun SettingsScreen(
     val labels by settings.labels.collectAsState()
     val keepScreenOn by settings.keepScreenOn.collectAsState()
     val demo by settings.demoSky.collectAsState()
+    val headingUp by settings.headingUp.collectAsState()
+    val geohash by settings.geohashPrecision.collectAsState()
     val context = LocalContext.current
 
     Column(
@@ -98,6 +109,12 @@ fun SettingsScreen(
                 "the same to people with red-green colour blindness."
         )
         Toggle("Satellite labels", labels) { settings.setLabels(it) }
+        Toggle("Turn with the phone", headingUp) { settings.setHeadingUp(it) }
+        HelpText(
+            "North stays up unless this is on. On, the circle turns as you turn, so up is " +
+                "where the phone points and a waypoint's triangle shows the way to walk. Uses " +
+                "the compass, corrected to true north for where you are."
+        )
 
         Spacer(Modifier.height(16.dp))
         SectionLabel("Position")
@@ -108,12 +125,18 @@ fun SettingsScreen(
             settings.setCoordinates(Settings.CoordinateFormat.DMS)
         }
         Spacer(Modifier.height(4.dp))
+        HelpText("Geohash shown with the position (tap it to copy):")
+        for ((precision, text) in GEOHASH_CHOICES) {
+            RadioRow(text, geohash == precision) { settings.setGeohashPrecision(precision) }
+        }
+        Spacer(Modifier.height(4.dp))
         RadioRow("Metric", units == Settings.Units.METRIC) { settings.setUnits(Settings.Units.METRIC) }
         RadioRow("Imperial", units == Settings.Units.IMPERIAL) { settings.setUnits(Settings.Units.IMPERIAL) }
 
         Spacer(Modifier.height(16.dp))
         SectionLabel("Screen")
-        Toggle("Keep the screen on while listening", keepScreenOn) { settings.setKeepScreenOn(it) }
+        Toggle("Keep the screen on", keepScreenOn) { settings.setKeepScreenOn(it) }
+        HelpText("TPS listens to the satellites only while it's on screen.")
 
         Spacer(Modifier.height(16.dp))
         SectionLabel("Appearance")

@@ -25,6 +25,9 @@ TPS makes that visible. It fits the TERRAN idea of "one people without nations".
 | 2 | **License** | **BSD-3-Clause**, like OVERWATCH. |
 | 3 | **Forgejo mirror** | **No.** GitHub only. |
 | 4 | **Scope of v0.1** | **As planned:** foreground only (no background service), no network at all, no Google Play services. |
+| 5 | **v0.1.0 release** | Tested outdoors on Kara's phone (GPS + Galileo + GLONASS fix) and released 2026-11-02. |
+| 6 | **START/STOP** | **Removed (v0.2).** TPS starts finding a fix as soon as it opens, and stops when it leaves the screen. |
+| 7 | **Navigation view** | **North-up by default**, with a setting to turn the circle with the phone (heading-up compass). |
 
 ## 2. What the research found
 
@@ -147,14 +150,17 @@ All API levels above were checked against `platforms/android-37.0/data/api-versi
 
 | OVERWATCH | TPS |
 |---|---|
-| Title `OVERWATCH` + gear | Title `TPS` (same letter-spaced monospace) + gear |
+| Title `OVERWATCH` + gear | Title `TPS` (same letter-spaced monospace), waypoints flag on the left, gear on the right |
 | Map circle, ring = threat tier | **Sky circle**, ring = **fix quality** |
 | Legend: ALPR / speed / cam / police / air | Legend: the constellations **in view right now** |
 | "tap circle for source details" | "tap circle for constellation details" |
 | "show within 1200 m" slider | **Position readout**: `position … ±3.2 m`, coordinates, alt / speed. Tap to copy. |
 | "Surveillance camera @ 91m • 43" | `3D fix • 26 of 39 sats` |
 | "Max score: 43" | `TTFF 6.8 s • HDOP 0.6 • dual-frequency` |
-| START / STOP | START / STOP (GNSS listening) |
+| START / STOP | **None** (v0.2): TPS listens whenever it's on screen. The bottom holds only notices with one button (allow location, turn on location). |
+| | v0.2: `geohash 9xchyjc2v` under the coordinates (tap to copy) |
+| | v0.2: **satellite time**: local and UTC time from GNSS, and how far off the phone's clock is |
+| | v0.2: **navigating to**: the target's label, distance and bearing, right under the circle |
 
 **Ring colour.** It uses OVERWATCH's four tier colours, but here green means good:
 
@@ -171,7 +177,11 @@ disc with `IDLE` or `SEARCHING`.
 
 **Sky circle encoding:**
 - North is up. The edge is the horizon and the centre is overhead. There are rings at 30°
-  and 60° and N/E/S/W labels.
+  and 60° and N/E/S/W labels. With **Turn with the phone** on (v0.2), up is where the
+  phone points instead: the compass (rotation-vector sensor, corrected to true north with
+  Android's offline World Magnetic Model) turns the sky, the letters and the waypoints.
+- Waypoints (v0.2) sit just outside the ring at their bearing from you: the one being
+  navigated to as a triangle pointing outwards, the rest as small dots.
 - Colour and shape show the constellation (see below).
 - **Filled** means used in the fix. **Hollow** means tracked but not used. A faint
   outline means predicted but not tracked (C/N0 = 0).
@@ -218,21 +228,51 @@ on by default. Settings can switch back to plain dots.
   - fix age
 - **CHIP card:** hardware model and year, the supported signal list, and capability flags.
 
+### Satellite time (v0.2)
+
+Every GNSS fix carries UTC time from the satellites (`Location.getTime()`), stamped on
+the phone's monotonic clock (`elapsedRealtimeNanos`). Between fixes, and after a fix is
+lost, the monotonic clock carries it forward, so the satellite clock stays right. It's
+shown in the phone's time zone and in UTC, with the phone clock's offset from it. TPS
+can't set the phone's clock: that needs a system permission. A later version could use
+`GnssClock` from raw measurements for sub-millisecond time.
+
+### Geohash (v0.2)
+
+Geohash is plain arithmetic on the coordinates, so it's offline. It's shown under the
+coordinates at 9 characters (a cell about 4.8 m across) by default, and Settings offers
+none, 7, 8, 9 or 10.
+
+### Waypoints and navigation (v0.2)
+
+- **Waypoints screen** (the flag): paste or type a list, one per line, with a label and
+  a position in either order. Decimal degrees (signed, or with N/S/E/W), degrees-minutes(-
+  seconds) and geohashes all work; lines that can't be read are reported, not dropped
+  silently. **Add where I am** saves the current fix, using the typed text as its label.
+  **Copy all** exports the list in a format the parser reads back.
+- **Navigating:** tap a waypoint. Its triangle sits outside the ring at its bearing, and
+  the readout gives the distance and bearing (great-circle, on the mean Earth radius). It
+  reads "you're there" within the fix's accuracy, or 8 m.
+- Stored on the phone in SharedPreferences, like everything else in TPS.
+
 ### Settings
 
 - Theme: system / dark / light, as in OVERWATCH
 - Units: metric / imperial
 - Coordinate format: decimal / DMS, with MGRS later
+- Geohash: none / 7 / 8 / 9 / 10 characters (v0.2)
 - Satellite labels on or off
-- Keep screen on while running
-- v0.2 adds: heading-up compass mode, and cold start (clear aiding data) to measure TTFF
+- Turn with the phone (heading-up compass), off by default (v0.2)
+- Keep screen on
+- Demo sky
+- v0.3 adds: cold start (clear aiding data) to measure TTFF
 - About: version, license, source link, and "TPS has no network permission"
 
 ## 4. Architecture
 
 ```
 org.soulstone.tps
-├── MainActivity.kt        permission flow, edge-to-edge, MAIN/SETTINGS routing (from OVERWATCH)
+├── MainActivity.kt        starts listening on screen, permission flow, edge-to-edge, MAIN/SETTINGS/WAYPOINTS routing
 ├── gnss/
 │   ├── GnssEngine.kt      LocationManager GPS_PROVIDER + GnssStatus + NMEA (or DemoSky) → one StateFlow
 │   ├── Sky.kt             Android-free model: Signal → Satellite (bands merged) → ConstellationSummary; sky projection
@@ -242,10 +282,19 @@ org.soulstone.tps
 │   ├── Dop.kt             DOP from geometry (one clock term per system), for chips without GSA
 │   ├── Fix.kt             Android-free fix, fix tiers, 2D/3D inference
 │   ├── DemoSky.kt         simulated orbits seen from Singapore, for the emulator and screenshots
-│   └── ChipInfo.kt        (v0.2) model/year, GnssCapabilities, getGnssSignalTypes() on API 34+
+│   └── ChipInfo.kt        (v0.3) model/year, GnssCapabilities, getGnssSignalTypes() on API 34+
+├── nav/
+│   ├── Geohash.kt         encode/decode, cell sizes
+│   ├── Geodesy.kt         distance, bearing, compass points
+│   ├── Waypoint.kt        the waypoint list parser (decimal, DMS, geohash) and its storage format
+│   ├── WaypointStore.kt   the list and the target, in SharedPreferences
+│   ├── Heading.kt         heading from a rotation matrix (top edge flat, camera upright), smoothing
+│   └── Compass.kt         rotation-vector sensor + declination → heading-up
 ├── data/Settings.kt       SharedPreferences + StateFlows (OVERWATCH pattern)
 └── ui/
-    ├── MainScreen.kt      OVERWATCH layout + Constellations sheet + POSITION card
+    ├── MainScreen.kt      OVERWATCH layout, position + geohash, satellite clock, navigation readout
+    ├── ConstellationsSheet.kt  the per-system cards and the POSITION card
+    ├── WaypointsScreen.kt
     ├── SkyCircle.kt       Compose Canvas sky plot and the constellation marks
     ├── PulseVisuals.kt    idle/searching pulse and the fix ring (from OVERWATCH)
     ├── Format.kt          coordinates, units, durations (Locale.ROOT)
@@ -264,11 +313,16 @@ org.soulstone.tps
 - **Permissions:** `ACCESS_FINE_LOCATION` and `ACCESS_COARSE_LOCATION`. If the user grants
   only approximate location, no GNSS status arrives, and TPS explains why. If location is
   switched off, nothing arrives either, so TPS says so and opens the setting.
-  `ACCESS_LOCATION_EXTRA_COMMANDS` (a normal permission) arrives in v0.2 for cold start.
+  `ACCESS_LOCATION_EXTRA_COMMANDS` (a normal permission) arrives in v0.3 for cold start.
+  The compass needs no permission.
   TPS has **no INTERNET permission**, no notifications and no background location.
 - **Lifecycle:**
-  - GNSS runs only while TPS is on screen and START is on.
-  - Leaving the app pauses it, and coming back resumes it.
+  - GNSS runs only while TPS is on screen, starting on its own (v0.2). On first launch
+    TPS asks for location straight away; if that's refused, it says why and offers to ask
+    again.
+  - Leaving the app stops it, and coming back starts it again. A rotation doesn't.
+  - The compass runs only in heading-up mode, and only on screen. Its heading is read in
+    the draw phase, so turning the phone redraws the circle without recomposing.
   - There is no foreground service until a feature like track logging needs one.
   - Recomposition is kept in leaf composables, OVERWATCH's PulseVisuals lesson, so the
     pulse never redraws the whole circle.
@@ -278,9 +332,10 @@ org.soulstone.tps
 | Version | Contents |
 |---|---|
 | **v0.0** ✓ 2026-11-02 | Scaffold: Gradle (copied from OVERWATCH), LICENSE, README, `.gitignore`, CI (build + unit tests on every push; APK attached to a Release on `v*` tags). `gh repo create KaraZajac/TPS --public`. First green build. |
-| **v0.1.0** built 2026-11-02, awaiting the outdoor phone test | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), MSL height, demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
-| **v0.2.0** | **Everything the chip can do:** CHIP card, "unsupported vs not in view", per-band detail, heading-up compass, satellite trails, cold start / TTFF test. |
-| **v0.3.0** (optional) | Raw measurements: signal codes and AGC per band. **Interference watch**, OVERWATCH-family: AGC drops, C/N0 flattening, GNSS clock vs phone clock, position jumps, with honest limits. Research stretch: **one fix per constellation** (GPS-only vs Galileo-only vs BeiDou-only dots from satellite PVT + pseudoranges), so each nation's answer appears next to the fused one. |
+| **v0.1.0** ✓ released 2026-11-02 | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), MSL height, demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
+| **v0.2.0** built 2026-11-02, awaiting the phone test | Starts on its own (no START/STOP), satellite time, geohash, waypoints (paste a list, add where you are) and navigation to them on the ring, heading-up compass as a setting. |
+| **v0.3.0** | **Everything the chip can do:** CHIP card, "unsupported vs not in view", per-band detail, satellite trails, cold start / TTFF test. |
+| **v0.4.0** (optional) | Raw measurements: signal codes and AGC per band. **Interference watch**, OVERWATCH-family: AGC drops, C/N0 flattening, GNSS clock vs phone clock, position jumps, with honest limits. Research stretch: **one fix per constellation** (GPS-only vs Galileo-only vs BeiDou-only dots from satellite PVT + pseudoranges), so each nation's answer appears next to the fused one. |
 | **Later** | tps.netslum.io site, F-Droid submission, GPX/NMEA logging. |
 
 ## 6. Testing
@@ -292,6 +347,8 @@ org.soulstone.tps
   - NMEA GSA/GGA parsing, including checksums
   - sky projection, including heading rotation
   - fix tiers
+  - geohash encode/decode, distance and bearing, the waypoint list parser, heading from a
+    rotation matrix, and the clock and distance formats (v0.2)
 - **On the emulator** (e.g. the `ow36` AVD), demo sky only: layout checks and labelled
   screenshots.
 - **On a real phone outdoors:** the actual test. Kara sideloads the CI APK. Check that

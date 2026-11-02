@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,15 +45,29 @@ import org.soulstone.tps.ui.theme.SkyColors
 import org.soulstone.tps.ui.theme.color
 import org.soulstone.tps.ui.theme.ringColor
 
+/** A waypoint's direction on the ring: the one being navigated to as a triangle, the rest as dots. */
+data class RingMarker(val bearingDeg: Float, val target: Boolean)
+
+/** The band outside the ring that the waypoint markers sit in. */
+private val MARKER_BAND = 16.dp
+
 /**
- * The sky circle: north up, horizon at the edge, overhead at the centre, every
- * satellite the chip reports drawn where it is. The ring around it is fix quality.
+ * The sky circle: horizon at the edge, overhead at the centre, every satellite the chip
+ * reports drawn where it is. The ring around it is fix quality, and waypoints sit just
+ * outside the ring in the direction you'd walk to reach them.
+ *
+ * North is up unless [heading] is given (heading-up mode): then the sky, the compass
+ * letters and the waypoint markers turn so that up is where the phone points. The
+ * heading is read only while drawing, so turning the phone redraws the circle without
+ * recomposing anything.
  */
 @Composable
 fun SkyCircle(
     state: GnssEngine.State,
     shapes: Boolean,
     labels: Boolean,
+    heading: State<Float?>?,
+    markers: List<RingMarker>,
     onTap: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -62,12 +77,14 @@ fun SkyCircle(
         FixRing(
             color = state.tier.ringColor(idle),
             pulsing = state.tier == FixTier.SEARCHING,
-            modifier = Modifier.fillMaxSize()
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(MARKER_BAND)
         )
         Box(
             Modifier
                 .fillMaxSize()
-                .padding(12.dp)
+                .padding(MARKER_BAND + 12.dp)
                 .clip(CircleShape)
         ) {
             when {
@@ -75,12 +92,22 @@ fun SkyCircle(
                 state.status != GnssEngine.Status.RUNNING ->
                     PulsingDisc(idle, animating = false, label = statusLabel(state.status), labelColor = muted)
                 state.sky.isEmpty -> PulsingDisc(FixColors.Red, animating = true, label = "SEARCHING", labelColor = Color.White)
-                else -> SkyPlot(state.sky, shapes, labels)
+                else -> SkyPlot(state.sky, shapes, labels, heading)
             }
+        }
+        if (markers.isNotEmpty()) {
+            RingMarkers(
+                markers = markers,
+                heading = heading,
+                targetColor = MaterialTheme.colorScheme.onBackground,
+                otherColor = muted,
+                modifier = Modifier.fillMaxSize()
+            )
         }
         Box(
             Modifier
                 .fillMaxSize()
+                .padding(MARKER_BAND)
                 .clip(CircleShape)
                 .semantics { contentDescription = "Sky circle. Tap for constellation details." }
                 .clickable(onClick = onTap)
@@ -97,15 +124,17 @@ private fun statusLabel(status: GnssEngine.Status): String = when (status) {
 }
 
 @Composable
-private fun SkyPlot(sky: SkySnapshot, shapes: Boolean, labels: Boolean) {
+private fun SkyPlot(sky: SkySnapshot, shapes: Boolean, labels: Boolean, heading: State<Float?>?) {
     val measurer = rememberTextMeasurer()
     val compassStyle = TextStyle(color = SkyColors.GridLabel, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    val northStyle = compassStyle.copy(color = SkyColors.SatelliteLabel)
     val ringStyle = TextStyle(color = SkyColors.GridLabel, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
     val labelStyle = TextStyle(color = SkyColors.SatelliteLabel, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
     // Predicted first and used last, so the satellites in the fix draw on top.
     val marks = sky.satellites.filter { it.plottable }.sortedByDescending { it.state.ordinal }
 
     Canvas(Modifier.fillMaxSize()) {
+        val h = heading?.value ?: 0f
         val c = center
         val outer = size.minDimension / 2
         drawCircle(
@@ -119,52 +148,97 @@ private fun SkyPlot(sky: SkySnapshot, shapes: Boolean, labels: Boolean) {
         for (elevation in listOf(60f, 30f, 0f)) {
             drawCircle(SkyColors.Grid, radius = plot * (90f - elevation) / 90f, center = c, style = Stroke(line))
         }
-        drawLine(SkyColors.Grid, Offset(c.x, c.y - plot), Offset(c.x, c.y + plot), line)
-        drawLine(SkyColors.Grid, Offset(c.x - plot, c.y), Offset(c.x + plot, c.y), line)
+        fun at(azimuth: Float, radius: Float): Offset {
+            val p = SkyProjection.project(azimuth, 0f, h)
+            return Offset(c.x + p.x * radius, c.y + p.y * radius)
+        }
+        drawLine(SkyColors.Grid, at(0f, plot), at(180f, plot), line)
+        drawLine(SkyColors.Grid, at(90f, plot), at(270f, plot), line)
 
-        fun label(text: String, style: TextStyle, at: Offset, centred: Boolean = true) {
+        fun label(text: String, style: TextStyle, position: Offset, centred: Boolean = true) {
             val layout = measurer.measure(text, style)
             val topLeft = if (centred) {
-                Offset(at.x - layout.size.width / 2f, at.y - layout.size.height / 2f)
+                Offset(position.x - layout.size.width / 2f, position.y - layout.size.height / 2f)
             } else {
-                at
+                position
             }
             drawText(layout, topLeft = topLeft)
         }
         val band = (outer + plot) / 2
-        label("N", compassStyle, Offset(c.x, c.y - band))
-        label("S", compassStyle, Offset(c.x, c.y + band))
-        label("E", compassStyle, Offset(c.x + band, c.y))
-        label("W", compassStyle, Offset(c.x - band, c.y))
-        label("30°", ringStyle, Offset(c.x + 3.dp.toPx(), c.y - plot * 60f / 90f + 2.dp.toPx()), centred = false)
-        label("60°", ringStyle, Offset(c.x + 3.dp.toPx(), c.y - plot * 30f / 90f + 2.dp.toPx()), centred = false)
+        // North is brighter, so it stands out when heading-up turns the letters around.
+        label("N", if (heading != null) northStyle else compassStyle, at(0f, band))
+        label("E", compassStyle, at(90f, band))
+        label("S", compassStyle, at(180f, band))
+        label("W", compassStyle, at(270f, band))
+        if (heading == null) {
+            label("30°", ringStyle, Offset(c.x + 3.dp.toPx(), c.y - plot * 60f / 90f + 2.dp.toPx()), centred = false)
+            label("60°", ringStyle, Offset(c.x + 3.dp.toPx(), c.y - plot * 30f / 90f + 2.dp.toPx()), centred = false)
+        }
 
         for (s in marks) {
-            val p = SkyProjection.project(s.azimuthDeg, s.elevationDeg)
-            val at = Offset(c.x + p.x * plot, c.y + p.y * plot)
+            val p = SkyProjection.project(s.azimuthDeg, s.elevationDeg, h)
+            val position = Offset(c.x + p.x * plot, c.y + p.y * plot)
             val r = markRadius(s).toPx()
             val color = s.constellation.color
             val shape = if (shapes) s.constellation.shape else MarkShape.CIRCLE
             when (s.state) {
-                SatState.USED -> drawMark(shape, at, r, color, filled = true)
+                SatState.USED -> drawMark(shape, position, r, color, filled = true)
                 SatState.TRACKED -> {
-                    drawMark(shape, at, r, color.copy(alpha = 0.18f), filled = true)
-                    drawMark(shape, at, r, color, filled = false, strokeWidth = 1.6.dp.toPx())
+                    drawMark(shape, position, r, color.copy(alpha = 0.18f), filled = true)
+                    drawMark(shape, position, r, color, filled = false, strokeWidth = 1.6.dp.toPx())
                 }
                 SatState.PREDICTED ->
-                    drawMark(shape, at, r, color.copy(alpha = 0.45f), filled = false, strokeWidth = 1.dp.toPx())
+                    drawMark(shape, position, r, color.copy(alpha = 0.45f), filled = false, strokeWidth = 1.dp.toPx())
             }
             if (s.dualFrequency) {
                 drawCircle(
                     color.copy(alpha = 0.75f),
                     radius = r * extent(shape) + 3.dp.toPx(),
-                    center = at,
+                    center = position,
                     style = Stroke(1.dp.toPx())
                 )
             }
             if (labels) {
                 val layout = measurer.measure(s.label, labelStyle)
-                drawText(layout, topLeft = Offset(at.x + r * extent(shape) + 3.dp.toPx(), at.y - layout.size.height / 2f))
+                drawText(layout, topLeft = Offset(position.x + r * extent(shape) + 3.dp.toPx(), position.y - layout.size.height / 2f))
+            }
+        }
+    }
+}
+
+/** Waypoints just outside the ring, at the bearing you'd walk. */
+@Composable
+private fun RingMarkers(
+    markers: List<RingMarker>,
+    heading: State<Float?>?,
+    targetColor: Color,
+    otherColor: Color,
+    modifier: Modifier
+) {
+    // The target last, so it's on top.
+    val ordered = markers.sortedBy { it.target }
+    Canvas(modifier) {
+        val h = heading?.value ?: 0f
+        val c = center
+        val ring = size.minDimension / 2 - MARKER_BAND.toPx()
+        for (m in ordered) {
+            val a = Math.toRadians((m.bearingDeg - h).toDouble())
+            val dir = Offset(sin(a).toFloat(), -cos(a).toFloat())
+            if (m.target) {
+                // A triangle standing on the ring, pointing outwards: the way to go.
+                val across = Offset(-dir.y, dir.x)
+                val base = c + dir * (ring + 1.dp.toPx())
+                val apex = c + dir * (ring + 15.dp.toPx())
+                val half = 7.dp.toPx()
+                val path = Path().apply {
+                    moveTo(apex.x, apex.y)
+                    lineTo(base.x + across.x * half, base.y + across.y * half)
+                    lineTo(base.x - across.x * half, base.y - across.y * half)
+                    close()
+                }
+                drawPath(path, targetColor)
+            } else {
+                drawCircle(otherColor, radius = 3.dp.toPx(), center = c + dir * (ring + 7.dp.toPx()))
             }
         }
     }

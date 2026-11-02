@@ -1,5 +1,8 @@
 package org.soulstone.tps.ui
 
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.TimeZone
 import kotlin.math.abs
@@ -15,6 +18,7 @@ object Format {
 
     private const val FEET_PER_METRE = 3.280839895
     private const val MPH_PER_MPS = 2.236936292
+    private const val METRES_PER_MILE = 1609.344
 
     /** `1.28680° N 103.85453° E`: five decimals, about a metre. */
     fun latLonDecimal(lat: Double, lon: Double): String = decimal(lat, 'N', 'S') + " " + decimal(lon, 'E', 'W')
@@ -76,9 +80,40 @@ object Format {
         return if (a < 10_000) sign + String.format(Locale.ROOT, "%.2f s", a / 1000.0) else "$sign${a / 1000} s"
     }
 
+    /** Distances to a waypoint: `850 m`, `1.24 km`, `12.3 km`; `328 ft`, `1.24 mi`. */
+    fun longDistance(m: Double, units: Units): String = when (units) {
+        Units.METRIC -> when {
+            m < 1_000 -> "${m.roundToLong()} m"
+            m < 10_000 -> String.format(Locale.ROOT, "%.2f km", m / 1000)
+            m < 100_000 -> String.format(Locale.ROOT, "%.1f km", m / 1000)
+            else -> "${(m / 1000).roundToLong()} km"
+        }
+        Units.IMPERIAL -> {
+            val miles = m / METRES_PER_MILE
+            when {
+                miles < 0.1 -> "${(m * FEET_PER_METRE).roundToLong()} ft"
+                miles < 10 -> String.format(Locale.ROOT, "%.2f mi", miles)
+                miles < 100 -> String.format(Locale.ROOT, "%.1f mi", miles)
+                else -> "${miles.roundToLong()} mi"
+            }
+        }
+    }
+
+    /** Wall-clock time in [zone]: `15:13:42 EST`, or `3:13:42 PM EST`. */
+    fun localClock(epochMs: Long, zone: ZoneId, is24Hour: Boolean): String =
+        DateTimeFormatter.ofPattern(if (is24Hour) "HH:mm:ss z" else "h:mm:ss a z", Locale.US)
+            .format(Instant.ofEpochMilli(epochMs).atZone(zone))
+
+    /** `Mon 2 Nov 2026`. */
+    fun date(epochMs: Long, zone: ZoneId): String =
+        DateTimeFormatter.ofPattern("EEE d MMM yyyy", Locale.US).format(Instant.ofEpochMilli(epochMs).atZone(zone))
+
     fun dop(value: Double): String = String.format(Locale.ROOT, "%.1f", value)
 
     fun degrees(value: Double): String = "${value.roundToLong()}°"
+
+    /** A compass bearing, 0° to 359°: 359.6° reads 0°, not 360°. */
+    fun bearing(value: Double): String = "${Math.floorMod(value.roundToLong(), 360L)}°"
 
     /** `19:46:02 UTC`. */
     fun utcTime(epochMs: Long): String {

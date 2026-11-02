@@ -44,6 +44,14 @@ class Settings private constructor(private val prefs: SharedPreferences) {
     private val _demoSky = MutableStateFlow(prefs.getBoolean(KEY_DEMO_SKY, false))
     val demoSky: StateFlow<Boolean> = _demoSky.asStateFlow()
 
+    // Off by default: north stays up. On, the circle turns with the phone's compass.
+    private val _headingUp = MutableStateFlow(prefs.getBoolean(KEY_HEADING_UP, false))
+    val headingUp: StateFlow<Boolean> = _headingUp.asStateFlow()
+
+    /** Geohash length shown with the position; 0 hides it. 9 characters is a cell about 5 m across. */
+    private val _geohashPrecision = MutableStateFlow(prefs.getInt(KEY_GEOHASH_PRECISION, 9).coerceIn(0, 12))
+    val geohashPrecision: StateFlow<Int> = _geohashPrecision.asStateFlow()
+
     fun setThemeMode(v: ThemeMode) { prefs.edit { putString(KEY_THEME, v.name) }; _themeMode.value = v }
     fun setUnits(v: Units) { prefs.edit { putString(KEY_UNITS, v.name) }; _units.value = v }
     fun setCoordinates(v: CoordinateFormat) { prefs.edit { putString(KEY_COORDINATES, v.name) }; _coordinates.value = v }
@@ -51,6 +59,12 @@ class Settings private constructor(private val prefs: SharedPreferences) {
     fun setLabels(v: Boolean) { prefs.edit { putBoolean(KEY_LABELS, v) }; _labels.value = v }
     fun setKeepScreenOn(v: Boolean) { prefs.edit { putBoolean(KEY_KEEP_SCREEN_ON, v) }; _keepScreenOn.value = v }
     fun setDemoSky(v: Boolean) { prefs.edit { putBoolean(KEY_DEMO_SKY, v) }; _demoSky.value = v }
+    fun setHeadingUp(v: Boolean) { prefs.edit { putBoolean(KEY_HEADING_UP, v) }; _headingUp.value = v }
+    fun setGeohashPrecision(v: Int) {
+        val p = v.coerceIn(0, 12)
+        prefs.edit { putInt(KEY_GEOHASH_PRECISION, p) }
+        _geohashPrecision.value = p
+    }
 
     companion object {
         private const val PREFS = "tps_settings"
@@ -61,6 +75,8 @@ class Settings private constructor(private val prefs: SharedPreferences) {
         private const val KEY_LABELS = "satellite_labels"
         private const val KEY_KEEP_SCREEN_ON = "keep_screen_on"
         private const val KEY_DEMO_SKY = "demo_sky"
+        private const val KEY_HEADING_UP = "heading_up"
+        private const val KEY_GEOHASH_PRECISION = "geohash_precision"
 
         @Volatile private var INSTANCE: Settings? = null
 

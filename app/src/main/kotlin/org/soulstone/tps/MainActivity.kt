@@ -17,6 +17,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,43 +29,58 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.soulstone.tps.data.Settings
 import org.soulstone.tps.gnss.GnssEngine
+import org.soulstone.tps.nav.Compass
+import org.soulstone.tps.nav.WaypointStore
+import org.soulstone.tps.ui.CompassView
 import org.soulstone.tps.ui.DisplayPrefs
 import org.soulstone.tps.ui.MainScreen
 import org.soulstone.tps.ui.Notice
 import org.soulstone.tps.ui.SettingsScreen
+import org.soulstone.tps.ui.WaypointsScreen
 import org.soulstone.tps.ui.theme.TpsTheme
 import org.soulstone.tps.ui.theme.isDarkTheme
 
+/**
+ * TPS starts listening as soon as it's on screen and stops when it leaves; there is no
+ * START or STOP. On first launch it asks for location straight away. If that's refused,
+ * the screen says why it's needed and offers to ask again.
+ */
 class MainActivity : ComponentActivity() {
 
     private lateinit var settings: Settings
     private lateinit var engine: GnssEngine
+    private lateinit var waypoints: WaypointStore
+    private lateinit var compass: Compass
 
     /** What the last permission prompt left us with. The engine reports everything else. */
     private enum class Access { OK, DENIED, DENIED_FOREVER, APPROXIMATE }
 
     private val access = mutableStateOf(Access.OK)
 
+    /** Ask on its own only once per launch; after that the screen's button asks. */
+    private var askedThisLaunch = false
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
         access.value = when {
             result[FINE] == true || granted(FINE) -> Access.OK
-            // Android 12+: the user picked "Approximate". Approximate location gets no
-            // satellite status at all, so TPS can't start. START asks again, which
-            // shows Android's "change to precise" prompt.
+            // Android 12+: "Approximate" was picked. It gets no satellite status at all;
+            // asking again shows Android's "change to precise" prompt.
             result[COARSE] == true || granted(COARSE) -> Access.APPROXIMATE
             ActivityCompat.shouldShowRequestPermissionRationale(this, FINE) -> Access.DENIED
             else -> Access.DENIED_FOREVER
         }
-        // First run: start straight away, so START needn't be pressed twice.
-        if (access.value == Access.OK) engine.start(demo = false)
+        startListening()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        askedThisLaunch = savedInstanceState?.getBoolean(KEY_ASKED) ?: false
         settings = Settings.get(this)
         engine = GnssEngine.get(this)
+        waypoints = WaypointStore.get(this)
+        compass = Compass(this)
 
         // Edge-to-edge on every release (Android 15+ enforces it anyway), with the
         // bars' icons following the theme TPS shows rather than the system's. The
@@ -87,20 +104,33 @@ class MainActivity : ComponentActivity() {
                 var screen by rememberSaveable { mutableStateOf(Screen.MAIN) }
                 val state by engine.state.collectAsState()
                 val keepOn by settings.keepScreenOn.collectAsState()
-                KeepScreenOn(state.wanted && keepOn)
+                val headingUp by settings.headingUp.collectAsState()
+                val units by settings.units.collectAsState()
+                val geohash by settings.geohashPrecision.collectAsState()
+                KeepScreenOn(keepOn)
+
+                // The compass runs only in heading-up mode (and onStop stops it).
+                LaunchedEffect(headingUp) { if (headingUp) compass.start() else compass.stop() }
+                SideEffect { state.fix?.let { compass.setPosition(it.latitude, it.longitude, it.altitudeM) } }
 
                 when (screen) {
                     Screen.MAIN -> {
-                        val units by settings.units.collectAsState()
                         val coordinates by settings.coordinates.collectAsState()
                         val shapes by settings.shapes.collectAsState()
                         val labels by settings.labels.collectAsState()
+                        val list by waypoints.waypoints.collectAsState()
+                        val targetId by waypoints.targetId.collectAsState()
+                        val headingState = compass.heading.collectAsState()
+                        val accuracy by compass.accuracyDeg.collectAsState()
                         val accessNow by access
                         MainScreen(
                             state = state,
-                            prefs = DisplayPrefs(units, coordinates, shapes, labels),
+                            prefs = DisplayPrefs(units, coordinates, shapes, labels, geohash),
+                            waypoints = list,
+                            target = list.firstOrNull { it.id == targetId },
+                            compass = if (headingUp) CompassView(headingState, accuracy, compass.available) else null,
                             notice = notice(state, accessNow),
-                            onStartStop = ::onStartStop,
+                            onOpenWaypoints = { screen = Screen.WAYPOINTS },
                             onOpenSettings = { screen = Screen.SETTINGS }
                         )
                     }
@@ -109,7 +139,22 @@ class MainActivity : ComponentActivity() {
                         BackHandler { screen = Screen.MAIN }
                         SettingsScreen(
                             settings = settings,
-                            onDemoChange = ::onDemoChange,
+                            onDemoChange = { on ->
+                                settings.setDemoSky(on)
+                                startListening()
+                            },
+                            onBack = { screen = Screen.MAIN }
+                        )
+                    }
+                    Screen.WAYPOINTS -> {
+                        BackHandler { screen = Screen.MAIN }
+                        WaypointsScreen(
+                            store = waypoints,
+                            fix = state.fix,
+                            fixValid = state.fixValid,
+                            units = units,
+                            geohashPrecision = geohash,
+                            onNavigate = { screen = Screen.MAIN },
                             onBack = { screen = Screen.MAIN }
                         )
                     }
@@ -118,84 +163,59 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putBoolean(KEY_ASKED, askedThisLaunch)
+    }
+
     override fun onStart() {
         super.onStart()
-        engine.onForeground()
+        if (granted(FINE)) access.value = Access.OK
+        startListening()
+        if (settings.headingUp.value) compass.start()
     }
 
     override fun onStop() {
-        // GNSS runs only while TPS is on screen. A rotation isn't leaving.
-        if (!isChangingConfigurations) engine.onBackground()
+        // GNSS and the compass run only while TPS is on screen. The compass belongs to
+        // this activity, so it always stops (a rotation starts the new one's); GNSS
+        // keeps going through a rotation, which isn't leaving.
+        compass.stop()
+        if (!isChangingConfigurations) engine.stop()
         super.onStop()
     }
 
-    override fun onResume() {
-        super.onResume()
-        // The user may have changed the permission in app settings meanwhile.
-        if (granted(FINE)) access.value = Access.OK
+    /** Listen in the current mode; on first launch, ask for location first. */
+    private fun startListening() {
+        val demo = settings.demoSky.value
+        engine.start(demo)
+        if (!demo && !granted(FINE) && !askedThisLaunch) requestLocation()
     }
 
-    private fun onStartStop() {
-        if (engine.state.value.wanted) {
-            engine.stop()
-            return
-        }
-        if (settings.demoSky.value) {
-            engine.start(demo = true)
-            return
-        }
-        when {
-            granted(FINE) -> {
-                access.value = Access.OK
-                engine.start(demo = false)
-            }
-            access.value == Access.DENIED_FOREVER -> openAppSettings()
-            else -> permissionLauncher.launch(arrayOf(FINE, COARSE))
-        }
-    }
-
-    private fun onDemoChange(on: Boolean) {
-        settings.setDemoSky(on)
-        val s = engine.state.value
-        if (s.wanted && s.demo != on) {
-            // Into demo: switch over now. Out of demo: stop, and let START ask for
-            // permission if it's needed.
-            if (on) engine.start(demo = true) else engine.stop()
-        }
+    private fun requestLocation() {
+        askedThisLaunch = true
+        permissionLauncher.launch(arrayOf(FINE, COARSE))
     }
 
     private fun notice(state: GnssEngine.State, access: Access): Notice? {
-        val openSettings = "Open app settings"
-        if (state.wanted && !state.demo) {
-            when (state.status) {
-                GnssEngine.Status.LOCATION_OFF -> return Notice(
-                    "Location is off, so Android sends no satellite data.",
-                    "Turn on location"
-                ) { openLocationSettings() }
-                GnssEngine.Status.NO_GNSS -> return Notice(
-                    "This device has no GNSS receiver. Demo sky still works (Settings)."
-                )
-                GnssEngine.Status.NEEDS_PERMISSION -> return Notice(
-                    "TPS no longer has location permission.", openSettings
-                ) { openAppSettings() }
-                GnssEngine.Status.APPROXIMATE_ONLY -> return Notice(
-                    "Approximate location gets no satellite data. Allow precise location for TPS.",
-                    openSettings
-                ) { openAppSettings() }
-                GnssEngine.Status.IDLE, GnssEngine.Status.RUNNING -> Unit
+        if (state.demo) return null
+        return when (state.status) {
+            GnssEngine.Status.NEEDS_PERMISSION -> if (access == Access.DENIED_FOREVER) {
+                Notice("Location permission is off for TPS. Allow it in app settings.", "Open app settings") {
+                    openAppSettings()
+                }
+            } else {
+                Notice("TPS needs precise location to hear the satellites.", "Allow location") { requestLocation() }
             }
-        }
-        if (state.wanted) return null
-        return when (access) {
-            Access.OK -> null
-            Access.DENIED -> Notice("TPS needs location permission to hear satellites. Tap START to allow it.")
-            Access.DENIED_FOREVER -> Notice("Location permission is denied. Allow it in app settings.", openSettings) {
-                openAppSettings()
-            }
-            Access.APPROXIMATE -> Notice(
-                "Approximate location gets no satellite data. Tap START and choose Precise, or allow it in app settings.",
-                openSettings
-            ) { openAppSettings() }
+            GnssEngine.Status.APPROXIMATE_ONLY -> Notice(
+                "Approximate location gets no satellite data. Choose Precise, or allow it in app settings.",
+                "Allow precise location"
+            ) { requestLocation() }
+            GnssEngine.Status.LOCATION_OFF -> Notice(
+                "Location is off, so Android sends no satellite data.",
+                "Turn on location"
+            ) { openLocationSettings() }
+            GnssEngine.Status.NO_GNSS -> Notice("This device has no GNSS receiver. Demo sky still works (Settings).")
+            GnssEngine.Status.IDLE, GnssEngine.Status.RUNNING -> null
         }
     }
 
@@ -214,11 +234,12 @@ class MainActivity : ComponentActivity() {
         runCatching { startActivity(Intent(AndroidSettings.ACTION_LOCATION_SOURCE_SETTINGS)) }
     }
 
-    private enum class Screen { MAIN, SETTINGS }
+    private enum class Screen { MAIN, SETTINGS, WAYPOINTS }
 
     private companion object {
         const val FINE = Manifest.permission.ACCESS_FINE_LOCATION
         const val COARSE = Manifest.permission.ACCESS_COARSE_LOCATION
+        const val KEY_ASKED = "asked_for_location"
 
         // androidx's own navigation-bar scrims, which only Android 8–9 draw.
         val LIGHT_SCRIM = Color.argb(0xe6, 0xFF, 0xFF, 0xFF)
@@ -226,7 +247,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-/** Holds the screen on while [on]; TPS only listens while it's on screen. */
+/** Holds the screen on while [on]. TPS only listens while it's on screen anyway. */
 @Composable
 private fun KeepScreenOn(on: Boolean) {
     val view = LocalView.current

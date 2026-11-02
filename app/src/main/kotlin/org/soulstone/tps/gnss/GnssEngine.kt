@@ -36,8 +36,8 @@ import kotlinx.coroutines.launch
  * Android only runs the GNSS engine while someone requests GPS_PROVIDER locations, so
  * TPS holds that request (straight from LocationManager, never the fused provider,
  * which hides which satellites made a fix). Satellite status and NMEA arrive alongside
- * it. Everything runs only while TPS is on screen: MainActivity calls [onForeground]
- * and [onBackground], and START/STOP call [start] and [stop].
+ * it. Everything runs only while TPS is on screen: MainActivity calls [start] when it
+ * comes on screen and [stop] when it leaves.
  *
  * Callbacks arrive on a private thread. Each activation is a new session, and anything
  * still queued from an older one is dropped.
@@ -50,7 +50,7 @@ class GnssEngine private constructor(context: Context) {
     data class Ttff(val millis: Long, val fromChip: Boolean)
 
     data class State(
-        /** START was pressed (the button shows STOP). */
+        /** Listening was asked for (TPS is on screen). */
         val wanted: Boolean = false,
         val demo: Boolean = false,
         val status: Status = Status.IDLE,
@@ -89,33 +89,23 @@ class GnssEngine private constructor(context: Context) {
     private var tickJob: Job? = null
     private var demoJob: Job? = null
 
-    /** START: begin listening (to the chip, or to demo sky). Main thread. */
+    /**
+     * Listen to the chip, or to demo sky. Safe to call every time TPS comes on screen:
+     * it does nothing if already listening in that mode, and otherwise starts afresh,
+     * re-checking permission and location. Main thread.
+     */
     fun start(demo: Boolean) {
+        val s = _state.value
+        if (active && s.demo == demo && (s.status == Status.RUNNING || s.status == Status.LOCATION_OFF)) return
         deactivate()
         _state.value = State(wanted = true, demo = demo)
         activate()
     }
 
-    /** STOP. Main thread. */
+    /** Stop listening and forget the session. Main thread. */
     fun stop() {
         deactivate()
         _state.value = State()
-    }
-
-    /** TPS came on screen: resume if START is on. Also re-checks permission and location. */
-    fun onForeground() {
-        val s = _state.value
-        if (s.wanted && (!active || s.status != Status.RUNNING && s.status != Status.LOCATION_OFF)) {
-            deactivate()
-            activate()
-        }
-    }
-
-    /** TPS left the screen: stop listening, keep START on. */
-    fun onBackground() {
-        if (!active) return
-        deactivate()
-        _state.update { State(wanted = it.wanted, demo = it.demo) }
     }
 
     private fun activate() {

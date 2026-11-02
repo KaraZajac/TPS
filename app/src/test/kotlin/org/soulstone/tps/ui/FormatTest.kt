@@ -62,6 +62,33 @@ class FormatTest {
     }
 
     @Test
+    fun waypointDistances() {
+        assertEquals("850 m", Format.longDistance(850.4, Units.METRIC))
+        assertEquals("1.24 km", Format.longDistance(1_240.0, Units.METRIC))
+        assertEquals("12.3 km", Format.longDistance(12_345.0, Units.METRIC))
+        assertEquals("123 km", Format.longDistance(123_456.0, Units.METRIC))
+        assertEquals("328 ft", Format.longDistance(100.0, Units.IMPERIAL))
+        assertEquals("1.24 mi", Format.longDistance(2_000.0, Units.IMPERIAL))
+    }
+
+    @Test
+    fun bearingsWrapAtNorth() {
+        assertEquals("0°", Format.bearing(359.6))
+        assertEquals("119°", Format.bearing(119.4))
+        assertEquals("350°", Format.bearing(-10.0))
+    }
+
+    @Test
+    fun clocks() {
+        val t = java.time.Instant.parse("2026-11-02T20:13:42Z").toEpochMilli()
+        val ny = java.time.ZoneId.of("America/New_York")
+        assertEquals("15:13:42 EST", Format.localClock(t, ny, is24Hour = true))
+        assertEquals("3:13:42 PM EST", Format.localClock(t, ny, is24Hour = false))
+        assertEquals("Mon 2 Nov 2026", Format.date(t, ny))
+        assertEquals("20:13:42 UTC", Format.utcTime(t))
+    }
+
+    @Test
     fun utcTimes() {
         assertEquals("00:00:00 UTC", Format.utcTime(0))
         assertEquals("23:59:59 UTC", Format.utcTime(86_399_000))
