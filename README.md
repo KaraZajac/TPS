@@ -51,14 +51,17 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   the circle.
 - **The circle turns with the phone** (heading-up), so the triangle points the way to
   walk. Turn **Turn with the phone** off in Settings for north-up.
-- **Own fixes** (in progress, v0.3): on phones that hand apps raw measurements and the
-  satellites' navigation messages, TPS decodes the GPS and Galileo orbits from the
-  broadcasts itself and computes its own position, once per system and once for all,
-  plotted around the chip's fix. A different answer from the chip is a cross-check
-  against spoofing. GLONASS and BeiDou come next.
+- **Own fixes** (in progress, v0.3): on phones that hand apps raw measurements, TPS
+  computes its own position, once per system and once for all, plotted around the chip's
+  fix. A different answer from the chip, or from another system, is a cross-check
+  against spoofing. TPS gets the orbits by decoding the satellites' navigation messages
+  itself (GPS and Galileo so far). On phones that don't pass those on, it uses the
+  satellite positions the chip computes: Android makes the getter system-only, but every
+  measurement carries the data in its public serialized form, and TPS reads it from there.
 - **CHIP card**: the GNSS hardware, what it can do (raw measurements, navigation
-  messages, carrier phase…), the signals it supports, and a **raw-data recorder** that
-  writes Google's GnssLogger format and shares the file.
+  messages, satellite positions, carrier phase…), the signals it supports, and a
+  **raw-data recorder** that writes Google's GnssLogger format (plus the chip's satellite
+  positions) and shares the file.
 - **Constellations sheet** (tap the circle): all seven systems, each with who runs it,
   satellites in view and used, its bands, and a row per satellite. A POSITION card has
   the rest: both coordinate formats, geohash, ellipsoid and sea-level height,

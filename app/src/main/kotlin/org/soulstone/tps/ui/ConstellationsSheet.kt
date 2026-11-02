@@ -352,14 +352,14 @@ private fun mslSourceText(source: MslSource): String = when (source) {
 }
 
 @Composable
-internal fun KeyValue(key: String, value: String) {
+internal fun KeyValue(key: String, value: String, keyChars: Int = 12) {
     Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
         Text(
             text = key,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp,
             fontFamily = KibernetykMono,
-            modifier = Modifier.width(monoWidth(12, 11.sp))
+            modifier = Modifier.width(monoWidth(keyChars, 11.sp))
         )
         Text(
             text = value,

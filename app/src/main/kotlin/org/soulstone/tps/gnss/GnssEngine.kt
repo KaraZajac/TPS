@@ -35,9 +35,12 @@ import kotlinx.coroutines.launch
 import java.io.File
 import org.soulstone.tps.raw.Agc
 import org.soulstone.tps.raw.ChipInfo
+import org.soulstone.tps.raw.ChipPvt
+import org.soulstone.tps.raw.ChipPvtReader
 import org.soulstone.tps.raw.Geodetic
 import org.soulstone.tps.raw.NavMessage
 import org.soulstone.tps.raw.OwnFixEngine
+import org.soulstone.tps.raw.PvtRead
 import org.soulstone.tps.raw.RawClock
 import org.soulstone.tps.raw.RawEpoch
 import org.soulstone.tps.raw.RawMeasurement
@@ -363,12 +366,13 @@ class GnssEngine private constructor(context: Context) {
 
         val measurements = object : GnssMeasurementsEvent.Callback() {
             override fun onGnssMeasurementsReceived(event: GnssMeasurementsEvent) {
-                recorder.raw(event)
                 val epoch = toEpoch(event)
+                recorder.raw(event, epoch)
                 val s = _state.value
                 val chip = s.fix?.takeIf { s.fixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
                 // Defensive: one odd measurement mustn't take down the GNSS thread.
                 val report = runCatching { ownFix.solve(epoch, chip, s.sky) }.getOrNull()
+                val withPvt = epoch.measurements.mapNotNull { it.pvt }
                 update(id) {
                     it.copy(
                         raw = it.raw.copy(
@@ -378,6 +382,11 @@ class GnssEngine private constructor(context: Context) {
                             fullTracking = epoch.fullTracking,
                             agc = epoch.agc,
                             report = report ?: it.raw.report,
+                            pvtSignals = withPvt.size,
+                            pvtUnreadable = epoch.pvtUnreadable,
+                            pvtWhy = epoch.pvtWhy ?: it.raw.pvtWhy,
+                            pvtSeen = it.raw.pvtSeen || withPvt.isNotEmpty(),
+                            pvtSources = withPvt.groupingBy { p -> p.ephemerisSource ?: -1 }.eachCount(),
                         )
                     )
                 }
@@ -453,7 +462,23 @@ class GnssEngine private constructor(context: Context) {
             leapSecond = if (c.hasLeapSecond()) c.leapSecond else null,
             elapsedRealtimeNanos = if (Build.VERSION.SDK_INT >= 29 && c.hasElapsedRealtimeNanos()) c.elapsedRealtimeNanos else null,
         )
+        var unreadable = 0
+        var why: String? = null
         val measurements = e.measurements.map { m ->
+            // The chip's own satellite position, when it sends one (Android 12+).
+            val pvt: ChipPvt? = if (Build.VERSION.SDK_INT >= 31) {
+                when (val read = ChipPvtReader.read(m)) {
+                    is PvtRead.Found -> read.pvt
+                    is PvtRead.Unreadable -> {
+                        unreadable++
+                        if (why == null) why = read.why
+                        null
+                    }
+                    PvtRead.Absent -> null
+                }
+            } else {
+                null
+            }
             RawMeasurement(
                 constellation = Constellation.fromAndroid(m.constellationType),
                 svid = m.svid,
@@ -472,6 +497,7 @@ class GnssEngine private constructor(context: Context) {
                 snrDb = if (m.hasSnrInDb()) m.snrInDb else null,
                 basebandCn0DbHz = if (Build.VERSION.SDK_INT >= 30 && m.hasBasebandCn0DbHz()) m.basebandCn0DbHz else null,
                 codeType = if (Build.VERSION.SDK_INT >= 29 && m.hasCodeType()) m.codeType else null,
+                pvt = pvt,
             )
         }
         val agc = if (Build.VERSION.SDK_INT >= 33) {
@@ -480,7 +506,7 @@ class GnssEngine private constructor(context: Context) {
             emptyList()
         }
         val full = if (Build.VERSION.SDK_INT >= 34 && e.hasIsFullTracking()) e.isFullTracking else null
-        return RawEpoch(clock, measurements, agc, full)
+        return RawEpoch(clock, measurements, agc, full, pvtUnreadable = unreadable, pvtWhy = why)
     }
 
     /** Runs on the GNSS thread, where AltitudeConverter's blocking first load is fine. */

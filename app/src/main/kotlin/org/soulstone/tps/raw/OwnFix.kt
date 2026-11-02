@@ -16,9 +16,11 @@ data class SystemReport(
     val signals: Int,
     /** Of those, with the satellite's time decoded, so a pseudorange could be formed. */
     val ranged: Int,
-    /** Of those, with a decoded orbit TPS trusts. */
+    /** Of those, with an orbit TPS trusts: decoded by TPS, or the chip's own satellite position. */
     val withOrbit: Int,
     val solution: Solution?,
+    /** Of [withOrbit], from the chip's satellite positions. */
+    val fromChip: Int = 0,
 )
 
 data class OwnFixReport(
@@ -33,11 +35,20 @@ data class OwnFixReport(
     val navRejected: Int,
     /** Decoded orbits dropped because they put the satellite somewhere the chip doesn't. */
     val orbitsDisagreeing: Int,
+    /** This epoch's signals with the chip's satellite position, used. */
+    val chipOrbits: Int = 0,
+    /** This epoch's chip positions dropped: implausible, or not where the chip's own sky has the satellite. */
+    val chipOrbitsDropped: Int = 0,
+    /** Where the chip's orbits came from ([EphemerisSource] to signals; -1 when it doesn't say). */
+    val chipOrbitSources: Map<Int, Int> = emptyMap(),
 )
 
 /**
- * TPS's own position fixes, computed from the chip's raw measurements and the broadcast
- * navigation messages TPS decodes itself. Plain Kotlin; not thread-safe (one thread feeds it).
+ * TPS's own position fixes from the chip's raw measurements. A satellite's orbit comes from
+ * the broadcast navigation messages TPS decodes itself or, failing that, from the satellite
+ * position the chip computed and sent along with the measurement ([ChipPvt]). Either way the
+ * fix is TPS's: one per system, and one from all together. Plain Kotlin; not thread-safe
+ * (one thread feeds it).
  */
 class OwnFixEngine {
     private val gps = GpsLnavAssembler(Constellation.GPS)
@@ -83,24 +94,34 @@ class OwnFixEngine {
         val chipEcef = chip?.let { Geo.toEcef(it) }
 
         val observations = ArrayList<Observation>()
+        val fromChip = HashSet<Pair<Constellation, Int>>()
+        var chipDropped = 0
+        val chipSources = HashMap<Int, Int>()
         for (r in ranges) {
             val m = r.measurement
             val key = m.constellation to m.svid
-            val eph = orbits[key] ?: continue
-            if (!eph.healthy || Orbits.isBeidouGeo(m.constellation, m.svid)) continue
-            // The satellite's clock was off by dts when it stamped the signal.
-            var t = r.transmitTimeSeconds
-            t -= Orbits.clockError(eph, t)
-            if (abs(Orbits.sinceEpoch(t, eph.toe)) > MAX_AGE_S) continue
-            val state = Orbits.state(eph, t)
-            if (chip != null && chipEcef != null && !agreesWithChip(chip, chipEcef, state.position, m, sky)) {
-                orbits.remove(key)
-                disagreeing++
+            val eph = orbits[key]
+            if (eph != null) {
+                // A satellite flagged unhealthy is left out, whatever else knows its orbit.
+                if (!eph.healthy) continue
+                val own = decodedObservation(r, eph, chip, chipEcef, sky)
+                if (own != null) {
+                    observations += own
+                    continue
+                }
+            }
+            val pvt = m.pvt ?: continue
+            if (!pvt.plausible || (chip != null && chipEcef != null && !agreesWithChip(chip, chipEcef, pvt.position, m, sky))) {
+                chipDropped++
                 continue
             }
             observations += Observation(
-                m.constellation, m.svid, state.position, state.clockError, r.meters, r.sigmaMeters, m.carrierHz,
+                m.constellation, m.svid, pvt.position, pvt.clockMeters / Pseudoranges.C, r.meters, r.sigmaMeters, m.carrierHz,
+                ionoMeters = pvt.ionoMeters, tropoMeters = pvt.tropoMeters,
             )
+            fromChip += key
+            val source = pvt.ephemerisSource ?: -1
+            chipSources[source] = (chipSources[source] ?: 0) + 1
         }
 
         val systems = epoch.measurements.map { it.constellation }.distinct()
@@ -114,6 +135,7 @@ class OwnFixEngine {
                     ranged = ranges.count { it.measurement.constellation == c },
                     withOrbit = own.size,
                     solution = if (own.size >= 4) Solver.solve(own, chipEcef, klobuchar, receiveGpsSeconds) else null,
+                    fromChip = own.count { (it.constellation to it.svid) in fromChip },
                 )
             }
         val combined = if (observations.map { it.constellation }.distinct().size > 1) {
@@ -128,7 +150,28 @@ class OwnFixEngine {
             navMessages = HashMap(navCounts),
             navRejected = gps.rejected + qzss.rejected + galileo.rejected,
             orbitsDisagreeing = disagreeing,
+            chipOrbits = fromChip.size,
+            chipOrbitsDropped = chipDropped,
+            chipOrbitSources = chipSources,
         )
+    }
+
+    /** The observation from an orbit TPS decoded, or null when it's too old or disagrees with the chip (then dropped). */
+    private fun decodedObservation(r: Pseudorange, eph: KeplerEphemeris, chip: Geodetic?, chipEcef: Ecef?, sky: SkySnapshot?): Observation? {
+        val m = r.measurement
+        // TPS doesn't model BeiDou's geostationary orbits; the chip's position covers them.
+        if (Orbits.isBeidouGeo(m.constellation, m.svid)) return null
+        // The satellite's clock was off by dts when it stamped the signal.
+        var t = r.transmitTimeSeconds
+        t -= Orbits.clockError(eph, t)
+        if (abs(Orbits.sinceEpoch(t, eph.toe)) > MAX_AGE_S) return null
+        val state = Orbits.state(eph, t)
+        if (chip != null && chipEcef != null && !agreesWithChip(chip, chipEcef, state.position, m, sky)) {
+            orbits.remove(m.constellation to m.svid)
+            disagreeing++
+            return null
+        }
+        return Observation(m.constellation, m.svid, state.position, state.clockError, r.meters, r.sigmaMeters, m.carrierHz)
     }
 
     /**

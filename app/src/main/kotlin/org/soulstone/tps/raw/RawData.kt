@@ -39,6 +39,8 @@ data class RawMeasurement(
     val codeType: String? = null,
     val fullInterSignalBiasNanos: Double? = null,
     val satelliteInterSignalBiasNanos: Double? = null,
+    /** The chip's own position and clock for this satellite, when it sent them (Android 12+). */
+    val pvt: ChipPvt? = null,
 )
 
 /** Automatic gain control for one band (API 33): a sudden drop can mean jamming. */
@@ -50,6 +52,9 @@ data class RawEpoch(
     val measurements: List<RawMeasurement>,
     val agc: List<Agc> = emptyList(),
     val fullTracking: Boolean? = null,
+    /** Signals whose chip position was sent but couldn't be read, and why (the first). */
+    val pvtUnreadable: Int = 0,
+    val pvtWhy: String? = null,
 )
 
 /** One `GnssNavigationMessage`: a subframe, page or string of broadcast data. */

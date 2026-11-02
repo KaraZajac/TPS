@@ -20,4 +20,13 @@ data class RawState(
     val fullTracking: Boolean? = null,
     val agc: List<Agc> = emptyList(),
     val report: OwnFixReport? = null,
+    /** Signals in the latest event that came with the chip's satellite position. */
+    val pvtSignals: Int = 0,
+    /** Of the latest event's signals, those whose chip position was sent but couldn't be read, and why. */
+    val pvtUnreadable: Int = 0,
+    val pvtWhy: String? = null,
+    /** Whether any chip position has been read this session. */
+    val pvtSeen: Boolean = false,
+    /** Where the latest event's chip positions came from ([EphemerisSource] to signals; -1 when not said). */
+    val pvtSources: Map<Int, Int> = emptyMap(),
 )

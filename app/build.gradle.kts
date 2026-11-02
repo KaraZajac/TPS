@@ -14,8 +14,10 @@ android {
         applicationId = "org.soulstone.tps"
         minSdk = 26
         targetSdk = 36
-        versionCode = 5
-        versionName = "0.3.0-dev"
+        versionCode = 6
+        versionName = "0.3.0-dev.2"
+        // On-device checks of what only a real Android runtime can answer (run on an emulator).
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // Fixed debug keystore committed to the repo (a debug key is non-secret; its
@@ -75,4 +77,6 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.tooling)
 
     testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

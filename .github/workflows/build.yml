@@ -39,7 +39,8 @@ jobs:
       - name: Unit tests and debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew :app:testDebugUnitTest :app:assembleDebug --stacktrace --no-daemon
+          # The on-device tests need an emulator; CI only makes sure they still build.
+          ./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace --no-daemon
 
       - name: Upload test reports
         if: failure()

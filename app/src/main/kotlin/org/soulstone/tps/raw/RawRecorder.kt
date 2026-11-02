@@ -13,7 +13,9 @@ import java.util.Locale
 
 /**
  * Writes raw GNSS data in GnssLogger's text format (`Raw`, `Nav`, `Fix`, `Status` lines),
- * so a recording also opens in Google's own GNSS analysis tools. Used only on the GNSS thread.
+ * so a recording also opens in Google's own GNSS analysis tools. `SatPvt` lines are TPS's own
+ * addition: the chip's satellite positions, which GnssLogger doesn't record (tools skip
+ * line types they don't know). Used only on the GNSS thread.
  */
 class RawRecorder(private val dir: File) {
     private var writer: BufferedWriter? = null
@@ -44,6 +46,7 @@ class RawRecorder(private val dir: File) {
         line("# Fix,Provider,LatitudeDegrees,LongitudeDegrees,AltitudeMeters,SpeedMps,AccuracyMeters,BearingDegrees,UnixTimeMillis,SpeedAccuracyMps,BearingAccuracyDegrees,elapsedRealtimeNanos,VerticalAccuracyMeters")
         line("# Nav,Svid,Type,Status,MessageId,Sub-messageId,Data(Bytes)")
         line("# Status,UnixTimeMillis,SignalCount,SignalIndex,ConstellationType,Svid,CarrierFrequencyHz,Cn0DbHz,AzimuthDegrees,ElevationDegrees,UsedInFix,HasAlmanacData,HasEphemerisData,BasebandCn0DbHz")
+        line("# SatPvt,utcTimeMillis,TimeNanos,Svid,ConstellationType,CarrierFrequencyHz,Flags,XEcefMeters,YEcefMeters,ZEcefMeters,UreMeters,VxEcefMps,VyEcefMps,VzEcefMps,HardwareCodeBiasMeters,TimeCorrectionMeters,ClockDriftMps,IonoDelayMeters,TropoDelayMeters,TimeOfClockSeconds,TimeOfEphemerisSeconds,IssueOfDataClock,IssueOfDataEphemeris,EphemerisSource")
     }
 
     fun stop(): File? {
@@ -64,7 +67,8 @@ class RawRecorder(private val dir: File) {
         }
     }
 
-    fun raw(event: GnssMeasurementsEvent) {
+    /** [epoch] is the same event as TPS read it, for the chip's satellite positions. */
+    fun raw(event: GnssMeasurementsEvent, epoch: RawEpoch? = null) {
         if (writer == null) return
         val c = event.clock
         val now = System.currentTimeMillis()
@@ -109,6 +113,22 @@ class RawRecorder(private val dir: File) {
                     if (api30 && m.hasSatelliteInterSignalBiasUncertaintyNanos()) m.satelliteInterSignalBiasUncertaintyNanos.toString() else "",
                     if (Build.VERSION.SDK_INT >= 29 && m.hasCodeType()) m.codeType else "",
                     chipsetElapsed,
+                ).joinToString(",")
+            )
+        }
+        for (m in epoch?.measurements.orEmpty()) {
+            val p = m.pvt ?: continue
+            line(
+                listOf(
+                    "SatPvt", now.toString(), c.timeNanos.toString(), m.svid.toString(), m.constellation.androidId.toString(),
+                    m.carrierHz?.toString() ?: "", p.flags.toString(),
+                    p.position.x.toString(), p.position.y.toString(), p.position.z.toString(), p.positionUreMeters.toString(),
+                    p.velocity.x.toString(), p.velocity.y.toString(), p.velocity.z.toString(),
+                    p.hardwareCodeBiasMeters.toString(), p.timeCorrectionMeters.toString(), p.clockDriftMps.toString(),
+                    p.ionoMeters?.toString() ?: "", p.tropoMeters?.toString() ?: "",
+                    p.timeOfClockSeconds?.toString() ?: "", p.timeOfEphemerisSeconds?.toString() ?: "",
+                    p.issueOfDataClock?.toString() ?: "", p.issueOfDataEphemeris?.toString() ?: "",
+                    p.ephemerisSource?.toString() ?: "",
                 ).joinToString(",")
             )
         }

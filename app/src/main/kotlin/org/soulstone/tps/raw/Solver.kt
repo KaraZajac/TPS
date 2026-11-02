@@ -107,6 +107,9 @@ data class Observation(
     val pseudorange: Double,
     val sigma: Double,
     val carrierHz: Double?,
+    /** The chip's own delay estimates for this signal, used instead of TPS's models when given. */
+    val ionoMeters: Double? = null,
+    val tropoMeters: Double? = null,
 )
 
 data class SolvedSatellite(val constellation: Constellation, val svid: Int, val elevationDeg: Double, val residual: Double)
@@ -180,8 +183,8 @@ object Solver {
                     el = e
                     if (Math.toDegrees(el) < MASK) continue
                     val scale = o.carrierHz?.let { (L1 / it) * (L1 / it) } ?: 1.0
-                    correction += (klobuchar?.let { Atmosphere.klobuchar(it, geo, az, el, gpsSeconds) } ?: 0.0) * scale
-                    correction += Atmosphere.troposphere(geo, el)
+                    correction += o.ionoMeters ?: ((klobuchar?.let { Atmosphere.klobuchar(it, geo, az, el, gpsSeconds) } ?: 0.0) * scale)
+                    correction += o.tropoMeters ?: Atmosphere.troposphere(geo, el)
                 }
                 val clock = x[3 + systems.indexOf(o.constellation)]
                 val predicted = range + clock - Pseudoranges.C * o.satelliteClock + correction

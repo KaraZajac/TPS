@@ -41,9 +41,12 @@ import org.soulstone.tps.gnss.Constellation
 import org.soulstone.tps.gnss.GnssEngine
 import org.soulstone.tps.gnss.MarkShape
 import org.soulstone.tps.nav.Geodesy
+import android.os.Build
 import org.soulstone.tps.raw.ChipInfo
+import org.soulstone.tps.raw.EphemerisSource
 import org.soulstone.tps.raw.Geodetic
 import org.soulstone.tps.raw.NavType
+import org.soulstone.tps.raw.OwnFixReport
 import org.soulstone.tps.raw.RawStatus
 import org.soulstone.tps.raw.RecorderState
 import org.soulstone.tps.raw.Solution
@@ -97,20 +100,28 @@ internal fun OwnFixesCard(state: GnssEngine.State, prefs: DisplayPrefs, raw: Raw
         Column(modifier = Modifier.padding(12.dp)) {
             CardTitle("OWN FIXES")
             Spacer(Modifier.height(4.dp))
-            Note("TPS's own position from the raw signals and the orbits it decodes from the satellites' broadcasts, one per system, next to the chip's fix at the centre.")
+            Note("TPS's own position from the raw signals, one per system and one from all of them, around the chip's fix at the centre.")
             Spacer(Modifier.height(8.dp))
             // Android 12+ says outright what the chip can do; earlier, only the callbacks tell.
-            val canMeasure = raw.chip.capability("Raw measurements")
-            val canNavigate = raw.chip.capability("Navigation messages")
+            val canMeasure = raw.chip.capability(ChipInfo.RAW)
+            val canNavigate = raw.chip.capability(ChipInfo.NAVIGATION)
+            val canPosition = raw.chip.capability(ChipInfo.SATELLITE_POSITIONS)
+            val noNavigation = r.navigation == RawStatus.NOT_SUPPORTED || (canNavigate == false && r.navMessages == 0L)
             val blocker = when {
                 state.demo -> "Not in demo sky."
                 !state.running -> "Waiting for GNSS."
                 r.measurements == RawStatus.NOT_SUPPORTED || (canMeasure == false && r.epochs == 0L) ->
                     "This phone doesn't give apps raw measurements, so TPS can't compute a fix of its own."
                 r.measurements == RawStatus.NOT_ALLOWED -> "Android isn't allowing raw measurements right now."
-                r.navigation == RawStatus.NOT_SUPPORTED || (canNavigate == false && r.navMessages == 0L) ->
-                    "This phone gives raw measurements but not the satellites' navigation messages, so TPS has no orbits to work from (and no network to fetch them)."
                 report == null -> "Waiting for raw measurements."
+                // Without navigation messages, the orbits can only be the chip's own satellite positions.
+                noNavigation && !r.pvtSeen -> when {
+                    r.pvtUnreadable > 0 ->
+                        "The chip sends its satellite positions, but in a form TPS can't read on this Android version (${r.pvtWhy}). Without them or navigation messages, TPS has no orbits."
+                    canPosition == false || Build.VERSION.SDK_INT < 31 ->
+                        "This phone passes on neither the satellites' navigation messages nor the chip's own satellite positions, so TPS has no orbits to work from."
+                    else -> "Waiting for the chip's satellite positions. It sends them for satellites it has orbits for; none yet in ${r.epochs} rounds of measurements."
+                }
                 else -> null
             }
             if (blocker != null) {
@@ -124,19 +135,51 @@ internal fun OwnFixesCard(state: GnssEngine.State, prefs: DisplayPrefs, raw: Raw
                 OffsetPlot(solved.map { it.first.constellation to it.second }, combined, prefs.shapes)
                 Spacer(Modifier.height(8.dp))
             }
-            for (s in systems) SystemRow(s, offsetOf(chip, s.solution), prefs)
+            for (s in systems) SystemRow(s, offsetOf(chip, s.solution), prefs, chipPositions = r.pvtSeen)
             report.combined?.let { c ->
                 CombinedRow(c, combined, prefs)
+            }
+            orbitSources(report)?.let {
+                Spacer(Modifier.height(4.dp))
+                Note(it)
             }
             if (report.orbitsDisagreeing > 0) {
                 Spacer(Modifier.height(4.dp))
                 Note("${report.orbitsDisagreeing} decoded orbit(s) dropped: they put a satellite somewhere the chip doesn't.")
+            }
+            if (report.chipOrbitsDropped > 0) {
+                Spacer(Modifier.height(4.dp))
+                Note("${report.chipOrbitsDropped} of the chip's satellite positions left out: impossible values, or not where the chip's own sky view has the satellite.")
             }
             if (chip == null) {
                 Spacer(Modifier.height(4.dp))
                 Note("Distances appear once the chip has a fix to compare with.")
             }
         }
+    }
+}
+
+/** Where the chip says its orbits came from ([EphemerisSource] to signals), in words. */
+private fun sourceNames(sources: Map<Int, Int>): List<String> = sources.keys.sorted().mapNotNull { source ->
+    when (source) {
+        EphemerisSource.DEMODULATED -> "the satellites' broadcasts"
+        EphemerisSource.SERVER_NORMAL -> "an assistance server"
+        EphemerisSource.SERVER_LONG_TERM -> "a long-term prediction"
+        else -> null
+    }
+}
+
+/** Where this epoch's orbits came from, in words; null when none were used. */
+private fun orbitSources(report: OwnFixReport): String? {
+    val chip = report.chipOrbits
+    val decoded = report.systems.sumOf { it.withOrbit - it.fromChip }
+    val from = sourceNames(report.chipOrbitSources)
+    val chipText = "the chip's own satellite positions" + if (from.isEmpty()) "" else " (its orbits from " + from.joinToString(" and ") + ")"
+    return when {
+        chip > 0 && decoded > 0 -> "Orbits: $decoded decoded by TPS, $chip from $chipText."
+        chip > 0 -> "Orbits: $chipText."
+        decoded > 0 -> "Orbits: decoded by TPS from the satellites' broadcasts."
+        else -> null
     }
 }
 
@@ -152,7 +195,7 @@ private fun CardTitle(text: String) {
 }
 
 @Composable
-private fun SystemRow(s: SystemReport, offset: Offset3?, prefs: DisplayPrefs) {
+private fun SystemRow(s: SystemReport, offset: Offset3?, prefs: DisplayPrefs, chipPositions: Boolean) {
     val c = s.constellation
     val detail = when {
         s.solution != null && offset != null ->
@@ -160,7 +203,7 @@ private fun SystemRow(s: SystemReport, offset: Offset3?, prefs: DisplayPrefs) {
                 "  ±" + Format.distance(s.solution.residualRms, prefs.units)
         s.solution != null -> "${s.withOrbit} sats  solved"
         s.ranged == 0 -> "${s.signals} signals, none timed yet"
-        c !in DECODED -> "${s.ranged} timed · orbit decoding comes in v0.4"
+        s.withOrbit == 0 && c !in DECODED && !chipPositions -> "${s.ranged} timed · orbit decoding comes in v0.4"
         s.withOrbit < 4 -> "${s.ranged} timed · orbits for ${s.withOrbit} (needs 4)"
         else -> "${s.withOrbit} sats · no solution"
     }
@@ -274,10 +317,10 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
         Column(modifier = Modifier.padding(12.dp)) {
             CardTitle("CHIP")
             Spacer(Modifier.height(6.dp))
-            KeyValue("hardware", listOfNotNull(chip.hardware ?: "not reported", chip.year?.let { "($it)" }).joinToString(" "))
-            KeyValue("phone", chip.device)
-            KeyValue("Android", chip.android.removePrefix("Android "))
-            KeyValue(
+            ChipRow("hardware", listOfNotNull(chip.hardware ?: "not reported", chip.year?.let { "($it)" }).joinToString(" "))
+            ChipRow("phone", chip.device)
+            ChipRow("Android", chip.android.removePrefix("Android "))
+            ChipRow(
                 "raw data",
                 when {
                     state.demo -> "off in demo sky"
@@ -289,7 +332,7 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
                     else -> statusText(r.measurements)
                 }
             )
-            KeyValue(
+            ChipRow(
                 "nav messages",
                 when {
                     state.demo -> "off in demo sky"
@@ -297,15 +340,28 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
                         report.navMessages.entries.sortedBy { it.key }.joinToString(" · ") { "${NavType.name(it.key)} ${it.value}" } +
                             if (report.navRejected > 0) " · ${report.navRejected} failed checks" else ""
                     r.navMessages > 0 -> "receiving · ${r.navMessages}"
-                    raw.chip.capability("Navigation messages") == false -> "not supported by this phone"
+                    raw.chip.capability(ChipInfo.NAVIGATION) == false -> "not supported by this phone"
                     else -> statusText(r.navigation)
                 }
             )
+            ChipRow(
+                "sat positions",
+                when {
+                    state.demo -> "off in demo sky"
+                    r.pvtSignals > 0 -> "read from the chip · ${r.pvtSignals} of ${r.signals} signals" +
+                        sourceNames(r.pvtSources).let { if (it.isEmpty()) "" else " · orbits from " + it.joinToString(" and ") }
+                    r.pvtUnreadable > 0 -> "sent, but TPS can't read them on this Android version (${r.pvtWhy})"
+                    Build.VERSION.SDK_INT < 31 -> "Android 12+ only"
+                    chip.capability(ChipInfo.SATELLITE_POSITIONS) == false -> "not supported by this phone"
+                    r.epochs > 0 -> "none sent yet"
+                    else -> "waiting"
+                }
+            )
             if (report != null && report.orbits.isNotEmpty()) {
-                KeyValue("orbits decoded", report.orbits.entries.sortedBy { it.key.ordinal }.joinToString(" · ") { "${it.key.displayName} ${it.value}" })
+                ChipRow("orbits decoded", report.orbits.entries.sortedBy { it.key.ordinal }.joinToString(" · ") { "${it.key.displayName} ${it.value}" })
             }
             if (r.agc.isNotEmpty()) {
-                KeyValue(
+                ChipRow(
                     "AGC",
                     r.agc.distinctBy { it.constellation to it.carrierHz }.joinToString(" · ") {
                         it.constellation.displayName + " " + org.soulstone.tps.gnss.Bands.label(
@@ -315,14 +371,14 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
                 )
             }
             if (chip.capabilities.isNotEmpty()) {
-                KeyValue(
+                ChipRow(
                     "can do",
                     chip.capabilities.joinToString(" · ") { (name, has) ->
                         name.replaceFirstChar { it.lowercase() } + " " + when (has) { true -> "yes"; false -> "no"; null -> "?" }
                     }
                 )
             }
-            KeyValue(
+            ChipRow(
                 "signals",
                 when {
                     chip.signals == null -> "Android 14+ lists them"
@@ -368,6 +424,10 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
         }
     }
 }
+
+/** A CHIP card row: its keys run to 14 characters. */
+@Composable
+private fun ChipRow(key: String, value: String) = KeyValue(key, value, keyChars = 15)
 
 private fun statusText(s: RawStatus) = when (s) {
     RawStatus.UNKNOWN -> "waiting"

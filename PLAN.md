@@ -30,6 +30,7 @@ TPS makes that visible. It fits the TERRAN idea of "one people without nations".
 | 7 | **Navigation view** | **Heading-up by default** (the circle turns with the phone), with a setting for north-up. Changed from north-up-default after the v0.2.0 test. |
 | 8 | **Typeface** | **Kibernetyk Mono** by Pavlo Kilko, everywhere (SIL OFL 1.1; the license ships in the APK). Its glyphs are 0.72 em wide, and it has no ± or ▲, which Android draws from the system font. |
 | 9 | **Waypoints button** | A **star**. **Add where I am** asks for a label in a dialog. |
+| 10 | **Orbits on phones without navigation messages** | The **chip's own satellite positions** (`SatellitePvt`), read from each measurement's public serialized form (§8). Chosen by Kara after the CHIP card showed their phone sends raw measurements but no navigation messages. The alternative, importing a daily orbit file downloaded in the browser, stays possible later. |
 
 ## 2. What the research found
 
@@ -340,7 +341,7 @@ org.soulstone.tps
 | **v0.1.0** ✓ released 2026-11-02 | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), MSL height, demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
 | **v0.2.0** built 2026-11-02, tested on Kara's phone | Starts on its own (no START/STOP), satellite time, geohash, waypoints (paste a list, add where you are) and navigation to them on the ring, heading-up compass as a setting. |
 | **v0.2.1** built 2026-11-02, awaiting the phone test | Kibernetyk Mono everywhere, heading-up by default, a star for the waypoints, a label dialog for Add where I am. |
-| **v0.3.0** step 1 built 2026-11-02 (0.3.0-dev), awaiting the phone test | **Own fixes, step 1** (§8): CHIP card with the capabilities and live raw-data status, a raw-data recorder (GnssLogger format, shared from the phone), pseudoranges, GPS and Galileo navigation-message decoding, and per-constellation fixes next to the chip's. "Unsupported vs not in view" on the cards. |
+| **v0.3.0** step 1 built 2026-11-02 (0.3.0-dev); 0.3.0-dev.2 awaiting the outdoor test | **Own fixes, step 1** (§8): CHIP card with the capabilities and live raw-data status, a raw-data recorder (GnssLogger format, shared from the phone), pseudoranges, GPS and Galileo navigation-message decoding, and per-constellation fixes next to the chip's. "Unsupported vs not in view" on the cards. Kara's CHIP card (Sony XQ-CT62, Android 14, Qualcomm): raw measurements yes, navigation messages no, satellite PVT yes. So **0.3.0-dev.2** adds own fixes from the chip's satellite positions, which covers GPS, Galileo and GLONASS on that phone. |
 | **v0.4.0** | **Own fixes, step 2:** GLONASS and BeiDou decoding, the "each nation's answer" plot, and the **integrity check** (§8): own fixes vs the chip's, AGC per band, C/N0 flattening, clock and position jumps, with honest limits. Then per-band detail, satellite trails, cold start / TTFF test. |
 | **Later** | tps.netslum.io site, F-Droid submission, GPX/NMEA logging. |
 
@@ -424,16 +425,37 @@ doesn't share the chip's filtering or assistance data.
   is 14 s behind GPS time, GLONASS gives time of day in Moscow time), and their difference
   × c is the pseudorange. Usable only with the time-of-week (or GLONASS time-of-day)
   decoded or known, per the `State` bits.
-- **Where each satellite is.** `SatellitePvt` is a system API (not in the public SDK; only
-  `hasSatellitePvt()` is), and TPS has no network for downloaded orbits. So TPS decodes
-  the **broadcast navigation messages** (`GnssNavigationMessage`, API 24): GPS and QZSS
-  L1 C/A subframes 1–3 (with the IS-GPS-200 parity check), Galileo I/NAV word types 1–5
-  (CRC-24Q), then GLONASS strings 1–4 (state vectors, integrated with RK4) and BeiDou D1.
-  Phones that don't deliver navigation messages can't do this offline. A later option is
-  importing a RINEX navigation file from another device, which still needs no network
-  permission.
-- Every decoded orbit is checked against the chip: the satellite's azimuth and elevation
-  computed from it must match `GnssStatus` within a few degrees, or it's dropped.
+- **Where each satellite is.** TPS has no network for downloaded orbits. Two sources, in
+  this order:
+  1. **Broadcast navigation messages** TPS decodes itself (`GnssNavigationMessage`, API 24):
+     GPS and QZSS L1 C/A subframes 1–3 (with the IS-GPS-200 parity check), Galileo I/NAV
+     word types 1–5 (CRC-24Q), then GLONASS strings 1–4 (state vectors, integrated with
+     RK4) and BeiDou D1.
+  2. **The chip's own satellite positions** (`SatellitePvt`, Android 12+): position and
+     velocity at the signal's transmit time, the satellite clock correction (time
+     correction minus hardware code bias, in metres), the chip's ionosphere and
+     troposphere estimates, and from Android 13 the orbit's reference times, issue-of-data
+     numbers and source (broadcast, assistance server or long-term prediction). It's a
+     system API, but Android 14's `GnssMeasurementsProvider` delivers the same event to every
+     app with precise location, and the measurement's public `writeToParcel` writes it. So
+     TPS serializes each measurement and parses it out (`ChipPvtParser`): it finds the
+     class name, then reads the flags, three nested objects, two delays and five Android 13
+     fields (AOSP 14 and 16 are identical). It uses only public APIs: no reflection, no
+     hidden-API exemptions. An instrumented test (`ChipPvtDeviceTest`) has Android's own
+     `GnssMeasurement.CREATOR` read the layout back on Android 14 and 16 emulators. This is
+     how phones without navigation messages, like most Qualcomm ones, get own fixes, GLONASS
+     included.
+  - The chip's positions are less independent than decoded or imported orbits: they come
+    from the chip's own orbit data, so a spoofer broadcasting false orbits would fool
+    both. Comparing constellations still catches a spoofer that fakes only some of them.
+  - Not chosen for now: importing a daily orbit file. BKG's IGS data centre publishes a
+    multi-GNSS RINEX 3.05 file openly, about 1.2 MB, rebuilt every 15 minutes. It would
+    need a browser download before each outing, and would still need no network
+    permission.
+- Every orbit, decoded or from the chip, is checked against the chip's sky: the
+  satellite's azimuth and elevation computed from it must match `GnssStatus` within 3°,
+  or it's dropped. The chip's positions must also be physically possible (medium Earth
+  to geostationary orbit, sane clock and delays).
 
 **The solver.** Iterative weighted least squares on the pseudoranges: position plus a
 clock term per constellation; satellite clock (af0–af2, relativity, group delay), Earth
@@ -448,7 +470,8 @@ against the phone's network time; jumps in position or clock. Phones are not sur
 receivers: this catches crude spoofing and jamming, not a careful attacker.
 
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
-`Fix`, `Status` lines) to a file shared through Android's share sheet. It's how the
+`Fix`, `Status` lines) to a file shared through Android's share sheet. TPS adds `SatPvt`
+lines, the chip's satellite positions, which GnssLogger doesn't record. It's how the
 decoders get checked against real phones. The file contains your position, and TPS says so.
 
 ## Sources

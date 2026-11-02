@@ -24,6 +24,10 @@ data class ChipInfo(
     fun capability(name: String): Boolean? = capabilities.firstOrNull { it.first == name }?.second
 
     companion object {
+        const val RAW = "Raw measurements"
+        const val NAVIGATION = "Navigation messages"
+        const val SATELLITE_POSITIONS = "Satellite positions"
+
         fun read(lm: LocationManager?): ChipInfo {
             val hardware = if (Build.VERSION.SDK_INT >= 28) lm?.gnssHardwareModelName else null
             val year = if (Build.VERSION.SDK_INT >= 28) lm?.gnssYearOfHardware?.takeIf { it > 0 } else null
@@ -50,8 +54,8 @@ data class ChipInfo(
     private object Api31 {
         fun capabilities(c: GnssCapabilities): List<Pair<String, Boolean?>> {
             val list = mutableListOf<Pair<String, Boolean?>>(
-                "Raw measurements" to c.hasMeasurements(),
-                "Navigation messages" to c.hasNavigationMessages(),
+                RAW to c.hasMeasurements(),
+                NAVIGATION to c.hasNavigationMessages(),
                 "Antenna info" to c.hasAntennaInfo(),
             )
             if (Build.VERSION.SDK_INT >= 34) list += Api34.capabilities(c)
@@ -67,7 +71,8 @@ data class ChipInfo(
                 GnssCapabilities.CAPABILITY_UNSUPPORTED -> false
                 else -> null
             },
-            "Satellite PVT (system apps only)" to c.hasSatellitePvt(),
+            // SatellitePvt: the chip's own position and clock for each satellite it measures.
+            SATELLITE_POSITIONS to c.hasSatellitePvt(),
             "Correlation vectors" to c.hasMeasurementCorrelationVectors(),
             "Measurement corrections" to c.hasMeasurementCorrections(),
             "Satellite blocklist" to c.hasSatelliteBlocklist(),
