@@ -34,13 +34,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import org.soulstone.tps.BuildConfig
 import org.soulstone.tps.R
 import org.soulstone.tps.data.Settings
+import org.soulstone.tps.ui.theme.KibernetykMono
 
 private const val SOURCE_URL = "https://github.com/KaraZajac/TPS"
 
@@ -94,7 +94,7 @@ fun SettingsScreen(
                 text = "Settings",
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = KibernetykMono,
                 color = MaterialTheme.colorScheme.onBackground
             )
         }
@@ -111,9 +111,9 @@ fun SettingsScreen(
         Toggle("Satellite labels", labels) { settings.setLabels(it) }
         Toggle("Turn with the phone", headingUp) { settings.setHeadingUp(it) }
         HelpText(
-            "North stays up unless this is on. On, the circle turns as you turn, so up is " +
-                "where the phone points and a waypoint's triangle shows the way to walk. Uses " +
-                "the compass, corrected to true north for where you are."
+            "On (the default), the circle turns as you turn, so up is where the phone " +
+                "points and a waypoint's triangle shows the way to walk. Uses the compass, " +
+                "corrected to true north for where you are. Off, north stays up."
         )
 
         Spacer(Modifier.height(16.dp))
@@ -160,13 +160,14 @@ fun SettingsScreen(
         HelpText(
             "TPS ${BuildConfig.VERSION_NAME} · Terran Positioning System · BSD-3-Clause\n\n" +
                 "TPS has no network permission: it cannot send anything anywhere. It reads " +
-                "your phone's GNSS chip directly, without Google Play services."
+                "your phone's GNSS chip directly, without Google Play services.\n\n" +
+                "Typeface: Kibernetyk Mono by Pavlo Kilko, SIL Open Font License 1.1."
         )
         Text(
             text = SOURCE_URL.removePrefix("https://"),
             color = MaterialTheme.colorScheme.primary,
             fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             modifier = Modifier
                 .clickable {
                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(SOURCE_URL))
@@ -186,7 +187,7 @@ private fun SectionLabel(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
-        fontFamily = FontFamily.Monospace,
+        fontFamily = KibernetykMono,
         modifier = Modifier.padding(vertical = 8.dp)
     )
     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
@@ -208,7 +209,7 @@ private fun Toggle(label: String, value: Boolean, onChange: (Boolean) -> Unit) {
             text = label,
             color = MaterialTheme.colorScheme.onBackground,
             fontSize = 14.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             modifier = Modifier
                 .weight(1f, fill = true)
                 .padding(end = 12.dp)
@@ -224,7 +225,7 @@ private fun HelpText(text: String) {
         text = text,
         fontSize = 11.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontFamily = FontFamily.Monospace,
+        fontFamily = KibernetykMono,
         modifier = Modifier.padding(vertical = 4.dp)
     )
 }
@@ -244,7 +245,8 @@ private fun RadioRow(label: String, selected: Boolean, onClick: () -> Unit) {
             text = label,
             color = MaterialTheme.colorScheme.onBackground,
             fontSize = 14.sp,
-            fontFamily = FontFamily.Monospace
+            fontFamily = KibernetykMono,
+            modifier = Modifier.weight(1f)
         )
     }
 }

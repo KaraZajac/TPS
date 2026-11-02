@@ -27,7 +27,9 @@ TPS makes that visible. It fits the TERRAN idea of "one people without nations".
 | 4 | **Scope of v0.1** | **As planned:** foreground only (no background service), no network at all, no Google Play services. |
 | 5 | **v0.1.0 release** | Tested outdoors on Kara's phone (GPS + Galileo + GLONASS fix) and released 2026-11-02. |
 | 6 | **START/STOP** | **Removed (v0.2).** TPS starts finding a fix as soon as it opens, and stops when it leaves the screen. |
-| 7 | **Navigation view** | **North-up by default**, with a setting to turn the circle with the phone (heading-up compass). |
+| 7 | **Navigation view** | **Heading-up by default** (the circle turns with the phone), with a setting for north-up. Changed from north-up-default after the v0.2.0 test. |
+| 8 | **Typeface** | **Kibernetyk Mono** by Pavlo Kilko, everywhere (SIL OFL 1.1; the license ships in the APK). Its glyphs are 0.72 em wide, and it has no ± or ▲, which Android draws from the system font. |
+| 9 | **Waypoints button** | A **star**. **Add where I am** asks for a label in a dialog. |
 
 ## 2. What the research found
 
@@ -150,7 +152,7 @@ All API levels above were checked against `platforms/android-37.0/data/api-versi
 
 | OVERWATCH | TPS |
 |---|---|
-| Title `OVERWATCH` + gear | Title `TPS` (same letter-spaced monospace), waypoints flag on the left, gear on the right |
+| Title `OVERWATCH` + gear | Title `TPS` (Kibernetyk Mono, letter-spaced), waypoints star on the left, gear on the right |
 | Map circle, ring = threat tier | **Sky circle**, ring = **fix quality** |
 | Legend: ALPR / speed / cam / police / air | Legend: the constellations **in view right now** |
 | "tap circle for source details" | "tap circle for constellation details" |
@@ -176,10 +178,11 @@ While idle or before the first satellite arrives, the circle shows OVERWATCH's p
 disc with `IDLE` or `SEARCHING`.
 
 **Sky circle encoding:**
-- North is up. The edge is the horizon and the centre is overhead. There are rings at 30°
-  and 60° and N/E/S/W labels. With **Turn with the phone** on (v0.2), up is where the
-  phone points instead: the compass (rotation-vector sensor, corrected to true north with
+- The edge is the horizon and the centre is overhead. There are rings at 30° and 60° and
+  N/E/S/W labels. Up is where the phone points (**Turn with the phone**, on by default
+  since v0.2.1): the compass (rotation-vector sensor, corrected to true north with
   Android's offline World Magnetic Model) turns the sky, the letters and the waypoints.
+  With it off, north is up.
 - Waypoints (v0.2) sit just outside the ring at their bearing from you: the one being
   navigated to as a triangle pointing outwards, the rest as small dots.
 - Colour and shape show the constellation (see below).
@@ -245,10 +248,11 @@ none, 7, 8, 9 or 10.
 
 ### Waypoints and navigation (v0.2)
 
-- **Waypoints screen** (the flag): paste or type a list, one per line, with a label and
+- **Waypoints screen** (the star): paste or type a list, one per line, with a label and
   a position in either order. Decimal degrees (signed, or with N/S/E/W), degrees-minutes(-
   seconds) and geohashes all work; lines that can't be read are reported, not dropped
-  silently. **Add where I am** saves the current fix, using the typed text as its label.
+  silently. **Add where I am** asks for a label in a dialog (pre-filled with the time)
+  and saves the position from the moment of the tap.
   **Copy all** exports the list in a format the parser reads back.
 - **Navigating:** tap a waypoint. Its triangle sits outside the ring at its bearing, and
   the readout gives the distance and bearing (great-circle, on the mean Earth radius). It
@@ -262,7 +266,7 @@ none, 7, 8, 9 or 10.
 - Coordinate format: decimal / DMS, with MGRS later
 - Geohash: none / 7 / 8 / 9 / 10 characters (v0.2)
 - Satellite labels on or off
-- Turn with the phone (heading-up compass), off by default (v0.2)
+- Turn with the phone (heading-up compass), on by default (v0.2.1)
 - Keep screen on
 - Demo sky
 - v0.3 adds: cold start (clear aiding data) to measure TTFF
@@ -299,7 +303,8 @@ org.soulstone.tps
     ├── PulseVisuals.kt    idle/searching pulse and the fix ring (from OVERWATCH)
     ├── Format.kt          coordinates, units, durations (Locale.ROOT)
     ├── SettingsScreen.kt
-    └── theme/Theme.kt     OVERWATCH colours, fix-ring tiers, sky colours
+    ├── theme/Theme.kt     OVERWATCH colours, fix-ring tiers, sky colours
+    └── theme/Type.kt      Kibernetyk Mono, its glyph width, and the type scale
 ```
 
 - **Toolchain:** the same as OVERWATCH today: AGP 9.4.1, Kotlin 2.4.21, Gradle 9.8.1,
@@ -333,7 +338,8 @@ org.soulstone.tps
 |---|---|
 | **v0.0** ✓ 2026-11-02 | Scaffold: Gradle (copied from OVERWATCH), LICENSE, README, `.gitignore`, CI (build + unit tests on every push; APK attached to a Release on `v*` tags). `gh repo create KaraZajac/TPS --public`. First green build. |
 | **v0.1.0** ✓ released 2026-11-02 | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), MSL height, demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
-| **v0.2.0** built 2026-11-02, awaiting the phone test | Starts on its own (no START/STOP), satellite time, geohash, waypoints (paste a list, add where you are) and navigation to them on the ring, heading-up compass as a setting. |
+| **v0.2.0** built 2026-11-02, tested on Kara's phone | Starts on its own (no START/STOP), satellite time, geohash, waypoints (paste a list, add where you are) and navigation to them on the ring, heading-up compass as a setting. |
+| **v0.2.1** built 2026-11-02, awaiting the phone test | Kibernetyk Mono everywhere, heading-up by default, a star for the waypoints, a label dialog for Add where I am. |
 | **v0.3.0** | **Everything the chip can do:** CHIP card, "unsupported vs not in view", per-band detail, satellite trails, cold start / TTFF test. |
 | **v0.4.0** (optional) | Raw measurements: signal codes and AGC per band. **Interference watch**, OVERWATCH-family: AGC drops, C/N0 flattening, GNSS clock vs phone clock, position jumps, with honest limits. Research stretch: **one fix per constellation** (GPS-only vs Galileo-only vs BeiDou-only dots from satellite PVT + pseudoranges), so each nation's answer appears next to the fused one. |
 | **Later** | tps.netslum.io site, F-Droid submission, GPX/NMEA logging. |

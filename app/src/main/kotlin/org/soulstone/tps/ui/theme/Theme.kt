@@ -74,6 +74,7 @@ fun TpsTheme(
     val dark = isDarkTheme(mode, isSystemInDarkTheme())
     MaterialTheme(
         colorScheme = if (dark) DarkColors else LightColors,
+        typography = TpsTypography,
         content = content
     )
 }

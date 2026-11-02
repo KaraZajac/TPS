@@ -26,7 +26,8 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
 
 ## What it shows
 
-- **The sky circle.** North is up, the edge is the horizon and the centre is overhead.
+- **The sky circle.** Up is where the phone points, the edge is the horizon and the centre
+  is overhead.
   Every satellite the chip reports is drawn where it is:
   - **colour and shape** per system: GPS blue circle, Galileo gold triangle, BeiDou violet
     diamond, GLONASS red square, QZSS pink star, NavIC cyan inverted triangle, SBAS grey
@@ -43,12 +44,13 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   and whether the fix uses two frequencies.
 - **Satellite time**: the time from GNSS, in your time zone and in UTC, and how far off
   the phone's own clock is.
-- **Waypoints** (the flag): paste a list, one per line, a label and a position in either
+- **Waypoints** (the star): paste a list, one per line, a label and a position in either
   order: `Trailhead, 44.46044, -110.82814`, `Car 9xchyjc2v` or
-  `44°27'37.6"N 110°49'41.3"W Camp`. Or save where you are. Tap one to navigate: a triangle
-  outside the ring points to it, with the distance and bearing below the circle.
-- **Turn with the phone** (Settings): heading-up mode. The circle turns with the compass,
-  so the triangle points the way to walk. North-up is the default.
+  `44°27'37.6"N 110°49'41.3"W Camp`. Or save where you are and name it. Tap one to
+  navigate: a triangle outside the ring points to it, with the distance and bearing below
+  the circle.
+- **The circle turns with the phone** (heading-up), so the triangle points the way to
+  walk. Turn **Turn with the phone** off in Settings for north-up.
 - **Constellations sheet** (tap the circle): all seven systems, each with who runs it,
   satellites in view and used, its bands, and a row per satellite. A POSITION card has
   the rest: both coordinate formats, geohash, ellipsoid and sea-level height,
@@ -106,5 +108,7 @@ dependency adds a network permission. Waypoints and settings stay on the phone.
 
 ## License
 
-BSD-3-Clause; see [LICENSE](LICENSE). The icons are from Material Icons (Apache License
-2.0).
+BSD-3-Clause; see [LICENSE](LICENSE). The typeface is
+[Kibernetyk Mono](https://pavlokilko.github.io/KibernetykMono/) by Pavlo Kilko, under the
+SIL Open Font License 1.1 (`app/src/main/assets/licenses/KibernetykMono-OFL.txt`). The
+icons are from Material Icons (Apache License 2.0).

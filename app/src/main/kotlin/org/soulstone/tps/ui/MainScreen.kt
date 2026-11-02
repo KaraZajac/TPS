@@ -55,7 +55,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.TextUnit
@@ -78,6 +77,8 @@ import org.soulstone.tps.nav.Geohash
 import org.soulstone.tps.nav.Waypoint
 import org.soulstone.tps.ui.theme.FixColors
 import org.soulstone.tps.ui.theme.color
+import org.soulstone.tps.ui.theme.KibernetykMono
+import org.soulstone.tps.ui.theme.MONO_ADVANCE_EM
 
 /** The display preferences the main screen needs, as one snapshot. */
 data class DisplayPrefs(
@@ -175,7 +176,7 @@ fun MainScreen(
                     text = hint(compass),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 11.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = KibernetykMono,
                     textAlign = TextAlign.Center
                 )
                 if (target != null) {
@@ -234,7 +235,7 @@ private fun Header(onOpenWaypoints: () -> Unit, onOpenSettings: () -> Unit) {
             modifier = Modifier.align(Alignment.CenterStart)
         ) {
             Icon(
-                painter = painterResource(R.drawable.ic_flag),
+                painter = painterResource(R.drawable.ic_star),
                 contentDescription = "Waypoints",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -244,7 +245,7 @@ private fun Header(onOpenWaypoints: () -> Unit, onOpenSettings: () -> Unit) {
             color = MaterialTheme.colorScheme.onBackground,
             fontSize = 26.sp,
             fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             letterSpacing = 4.sp,
             modifier = Modifier.align(Alignment.Center)
         )
@@ -268,7 +269,7 @@ private fun DemoBadge(modifier: Modifier) {
         color = FixColors.Orange,
         fontSize = 11.sp,
         fontWeight = FontWeight.Bold,
-        fontFamily = FontFamily.Monospace,
+        fontFamily = KibernetykMono,
         modifier = modifier
             .border(1.dp, FixColors.Orange, RoundedCornerShape(4.dp))
             .padding(horizontal = 6.dp, vertical = 2.dp)
@@ -300,7 +301,7 @@ private fun Legend(state: GnssEngine.State, shapes: Boolean) {
                     text = c.displayName,
                     color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (dim) 0.6f else 1f),
                     fontSize = 10.sp,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = KibernetykMono
                 )
             }
         }
@@ -314,8 +315,8 @@ private fun ReadoutHeader(label: String, value: String) {
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
-        Text(value, color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, fontFamily = KibernetykMono)
+        Text(value, color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = KibernetykMono)
     }
 }
 
@@ -338,7 +339,7 @@ private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
                 text = if (state.running) "no fix yet" else "—",
                 color = muted,
                 fontSize = 18.sp,
-                fontFamily = FontFamily.Monospace
+                fontFamily = KibernetykMono
             )
             return@Column
         }
@@ -360,7 +361,7 @@ private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
                 text = "geohash $hash",
                 color = textColor,
                 fontSize = 15.sp,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = KibernetykMono,
                 modifier = Modifier.clickable { copy(context, "geohash", hash) }
             )
         }
@@ -378,7 +379,7 @@ private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
             text = parts.joinToString("  •  "),
             color = muted,
             fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             textAlign = TextAlign.Center
         )
         if (fix.mock) {
@@ -387,7 +388,7 @@ private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
                 "mock location: another app is supplying this position",
                 color = FixColors.Orange,
                 fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = KibernetykMono,
                 textAlign = TextAlign.Center
             )
         }
@@ -420,7 +421,7 @@ private fun FixSummary(state: GnssEngine.State) {
         text = headline,
         color = MaterialTheme.colorScheme.onBackground,
         fontSize = 16.sp,
-        fontFamily = FontFamily.Monospace
+        fontFamily = KibernetykMono
     )
     Spacer(Modifier.height(4.dp))
     val details = buildList {
@@ -485,13 +486,13 @@ private fun SatelliteClock(fix: Fix) {
             text = Format.localClock(gnssNow, zone, is24Hour),
             color = MaterialTheme.colorScheme.onBackground,
             fontSize = 18.sp,
-            fontFamily = FontFamily.Monospace
+            fontFamily = KibernetykMono
         )
         Text(
             text = Format.utcTime(gnssNow) + "  •  " + Format.date(gnssNow, zone),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.sp,
-            fontFamily = FontFamily.Monospace
+            fontFamily = KibernetykMono
         )
     }
 }
@@ -513,7 +514,7 @@ private fun TargetReadout(target: Waypoint, fix: Fix?, fixValid: Boolean, units:
             color = MaterialTheme.colorScheme.onBackground,
             fontSize = 16.sp,
             fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             textAlign = TextAlign.Center
         )
         val line = if (fix == null) {
@@ -532,14 +533,14 @@ private fun TargetReadout(target: Waypoint, fix: Fix?, fixValid: Boolean, units:
             text = line,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 14.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             textAlign = TextAlign.Center
         )
     }
 }
 
 /** "There": within the fix's own uncertainty, and never closer than 8 m. */
-private fun arrived(fix: Fix, w: Waypoint): Boolean =
+internal fun arrived(fix: Fix, w: Waypoint): Boolean =
     Geodesy.distanceMeters(fix.latitude, fix.longitude, w.latitude, w.longitude) <=
         max(8.0, (fix.accuracyM ?: 0f).toDouble())
 
@@ -568,7 +569,7 @@ private fun NoticeArea(notice: Notice) {
                     .fillMaxWidth()
                     .height(56.dp)
             ) {
-                Text(notice.action, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+                Text(notice.action, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = KibernetykMono)
             }
         }
     }
@@ -578,14 +579,14 @@ private fun NoticeArea(notice: Notice) {
 @Composable
 private fun FitText(text: String, maxSize: TextUnit, color: Color, modifier: Modifier = Modifier) {
     BoxWithConstraints(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        // A monospace glyph is about 0.6 em wide.
-        val fitting = with(LocalDensity.current) { (maxWidth / (text.length * 0.62f)).toSp() }
+        // Every Kibernetyk Mono glyph is the same width; a little slack for rounding.
+        val fitting = with(LocalDensity.current) { (maxWidth / (text.length * (MONO_ADVANCE_EM + 0.02f))).toSp() }
         val size = if (fitting.value < maxSize.value) fitting else maxSize
         Text(
             text = text,
             color = color,
             fontSize = size,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             maxLines = 1,
             softWrap = false
         )

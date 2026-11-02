@@ -44,8 +44,8 @@ class Settings private constructor(private val prefs: SharedPreferences) {
     private val _demoSky = MutableStateFlow(prefs.getBoolean(KEY_DEMO_SKY, false))
     val demoSky: StateFlow<Boolean> = _demoSky.asStateFlow()
 
-    // Off by default: north stays up. On, the circle turns with the phone's compass.
-    private val _headingUp = MutableStateFlow(prefs.getBoolean(KEY_HEADING_UP, false))
+    // On by default: the circle turns with the phone's compass. Off, north stays up.
+    private val _headingUp = MutableStateFlow(prefs.getBoolean(KEY_HEADING_UP, true))
     val headingUp: StateFlow<Boolean> = _headingUp.asStateFlow()
 
     /** Geohash length shown with the position; 0 hides it. 9 characters is a cell about 5 m across. */

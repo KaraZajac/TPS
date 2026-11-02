@@ -30,7 +30,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -47,6 +46,8 @@ import org.soulstone.tps.gnss.Satellite
 import org.soulstone.tps.nav.Geohash
 import org.soulstone.tps.ui.theme.color
 import org.soulstone.tps.ui.theme.ringColor
+import org.soulstone.tps.ui.theme.KibernetykMono
+import org.soulstone.tps.ui.theme.monoWidth
 
 /*
  * The constellations sheet: what the circle shows, one system per card, and a POSITION
@@ -65,7 +66,7 @@ internal fun ConstellationsSheet(state: GnssEngine.State, prefs: DisplayPrefs) {
             color = MaterialTheme.colorScheme.onBackground,
             fontSize = 14.sp,
             fontWeight = FontWeight.Bold,
-            fontFamily = FontFamily.Monospace
+            fontFamily = KibernetykMono
         )
         if (state.wanted && state.demo) {
             Spacer(Modifier.height(4.dp))
@@ -94,7 +95,7 @@ private fun Note(text: String) {
         text = text,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 11.sp,
-        fontFamily = FontFamily.Monospace
+        fontFamily = KibernetykMono
     )
 }
 
@@ -121,7 +122,7 @@ private fun ConstellationCard(summary: ConstellationSummary, shapes: Boolean, sb
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = KibernetykMono
                 )
                 StatusMark(summary, shapes)
             }
@@ -130,7 +131,7 @@ private fun ConstellationCard(summary: ConstellationSummary, shapes: Boolean, sb
                 text = cardHeadline(summary, sbasCorrections),
                 color = MaterialTheme.colorScheme.onSurface,
                 fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace
+                fontFamily = KibernetykMono
             )
             if (summary.satellites.isNotEmpty()) {
                 Spacer(Modifier.height(4.dp))
@@ -195,7 +196,7 @@ private fun SatelliteRow(s: Satellite) {
     val position = if (s.positionKnown) {
         "el ${Format.degrees(s.elevationDeg.toDouble())} az ${Format.degrees(s.azimuthDeg.toDouble())}"
     } else {
-        "position unknown"
+        "no position"
     }
     val signal = if (s.state == SatState.PREDICTED) "no signal" else "${s.cn0DbHz.roundToInt()} dB-Hz"
     val status = when {
@@ -203,15 +204,17 @@ private fun SatelliteRow(s: Satellite) {
         s.state == SatState.USED -> "used"
         else -> ""
     }
+    // Columns sized from the font: "R k=+6", "no signal", "el 71° az 222°".
+    val gap = 6.dp
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-        Cell(s.label, 44.dp, color)
-        Cell(signal, 66.dp, color)
-        Cell(position, 104.dp, color)
+        Cell(s.label, monoWidth(6, ROW_TEXT) + gap, color)
+        Cell(signal, monoWidth(9, ROW_TEXT) + gap, color)
+        Cell(position, monoWidth(14, ROW_TEXT) + gap, color)
         Text(
             text = listOf(s.bands.joinToString("+"), status).filter { it.isNotEmpty() }.joinToString("  "),
             color = color,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
+            fontSize = ROW_TEXT,
+            fontFamily = KibernetykMono,
             maxLines = 1,
             softWrap = false,
             overflow = TextOverflow.Ellipsis,
@@ -220,13 +223,15 @@ private fun SatelliteRow(s: Satellite) {
     }
 }
 
+private val ROW_TEXT = 10.5.sp
+
 @Composable
 private fun Cell(text: String, width: Dp, color: Color) {
     Text(
         text = text,
         color = color,
-        fontSize = 11.sp,
-        fontFamily = FontFamily.Monospace,
+        fontSize = ROW_TEXT,
+        fontFamily = KibernetykMono,
         maxLines = 1,
         softWrap = false,
         overflow = TextOverflow.Clip,
@@ -254,7 +259,7 @@ private fun PositionCard(state: GnssEngine.State, prefs: DisplayPrefs) {
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
+                    fontFamily = KibernetykMono
                 )
                 Box(
                     Modifier
@@ -342,14 +347,14 @@ private fun KeyValue(key: String, value: String) {
             text = key,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
-            modifier = Modifier.width(100.dp)
+            fontFamily = KibernetykMono,
+            modifier = Modifier.width(monoWidth(12, 11.sp))
         )
         Text(
             text = value,
             color = MaterialTheme.colorScheme.onSurface,
             fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = KibernetykMono,
             modifier = Modifier.weight(1f)
         )
     }

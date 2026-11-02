@@ -48,8 +48,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.Instant
@@ -65,6 +75,7 @@ import org.soulstone.tps.nav.Waypoint
 import org.soulstone.tps.nav.WaypointStore
 import org.soulstone.tps.nav.WaypointText
 import org.soulstone.tps.ui.theme.FixColors
+import org.soulstone.tps.ui.theme.KibernetykMono
 
 private const val EXAMPLES = "Trailhead, 44.46044, -110.82814\n" +
     "Car 9xchyjc2v\n" +
@@ -89,6 +100,15 @@ fun WaypointsScreen(
     var input by rememberSaveable { mutableStateOf("") }
     var result by remember { mutableStateOf<String?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
+    var here by remember { mutableStateOf<Fix?>(null) }
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
+    // Closing the name dialog shouldn't hand the keyboard to the paste box.
+    fun closeDialog() {
+        here = null
+        focusManager.clearFocus()
+        keyboard?.hide()
+    }
     val context = LocalContext.current
 
     Column(
@@ -111,7 +131,7 @@ fun WaypointsScreen(
                 text = "Waypoints",
                 fontSize = 22.sp,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
+                fontFamily = KibernetykMono,
                 color = MaterialTheme.colorScheme.onBackground
             )
         }
@@ -125,9 +145,9 @@ fun WaypointsScreen(
         OutlinedTextField(
             value = input,
             onValueChange = { input = it },
-            placeholder = { Text(EXAMPLES, fontFamily = FontFamily.Monospace, fontSize = 12.sp) },
+            placeholder = { Text(EXAMPLES, fontFamily = KibernetykMono, fontSize = 12.sp) },
             minLines = 3,
-            textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace, fontSize = 13.sp),
+            textStyle = LocalTextStyle.current.copy(fontFamily = KibernetykMono, fontSize = 13.sp),
             modifier = Modifier.fillMaxWidth()
         )
         Spacer(Modifier.height(8.dp))
@@ -139,14 +159,9 @@ fun WaypointsScreen(
                 if (parsed.errors.isEmpty()) input = ""
             }
             ActionButton("Add where I am", enabled = fix != null && fixValid, modifier = Modifier.weight(1.4f)) {
-                val f = fix ?: return@ActionButton
-                // Text with no position in it is taken as the label for this one.
-                val typed = input.trim().takeIf { it.isNotEmpty() && '\n' !in it && WaypointText.parseLine(it) == null }
-                val label = typed ?: ("Here " + DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
-                    .format(Instant.ofEpochMilli(f.gnssTimeMs).atZone(ZoneId.systemDefault())))
-                store.add(listOf(WaypointText.Parsed(label, f.latitude, f.longitude)))
-                if (typed != null) input = ""
-                result = "Added “$label”."
+                // The position from the moment of the tap, not after the label is typed.
+                focusManager.clearFocus()
+                here = fix
             }
         }
         result?.let { Note(it) }
@@ -189,6 +204,19 @@ fun WaypointsScreen(
         Spacer(Modifier.height(24.dp))
     }
 
+    here?.let { f ->
+        NameDialog(
+            fix = f,
+            geohashPrecision = geohashPrecision,
+            onSave = { label ->
+                store.add(listOf(WaypointText.Parsed(label, f.latitude, f.longitude)))
+                result = "Added “$label”."
+                closeDialog()
+            },
+            onDismiss = { closeDialog() }
+        )
+    }
+
     if (confirmClear) {
         AlertDialog(
             onDismissRequest = { confirmClear = false },
@@ -200,6 +228,54 @@ fun WaypointsScreen(
             dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Keep") } }
         )
     }
+}
+
+/** Asks for a label for the current position; Save alone keeps the suggested one. */
+@Composable
+private fun NameDialog(fix: Fix, geohashPrecision: Int, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    val suggestion = remember(fix) {
+        "Here " + DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)
+            .format(Instant.ofEpochMilli(fix.gnssTimeMs).atZone(ZoneId.systemDefault()))
+    }
+    // Pre-filled and selected, so typing replaces it.
+    var name by remember { mutableStateOf(TextFieldValue(suggestion, selection = TextRange(0, suggestion.length))) }
+    val focus = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
+    fun save() = onSave(name.text.trim().ifEmpty { suggestion }.take(60))
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Name this place") },
+        text = {
+            Column {
+                Text(
+                    text = Format.latLonDecimal(fix.latitude, fix.longitude) +
+                        if (geohashPrecision > 0) "\n" + Geohash.encode(fix.latitude, fix.longitude, geohashPrecision) else "",
+                    fontSize = 12.sp,
+                    fontFamily = KibernetykMono,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    singleLine = true,
+                    label = { Text("Label") },
+                    textStyle = LocalTextStyle.current.copy(fontFamily = KibernetykMono, fontSize = 15.sp),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { save() }),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .focusRequester(focus)
+                )
+                LaunchedEffect(Unit) {
+                    focus.requestFocus()
+                    keyboard?.show()
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { save() }) { Text("Save") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 private fun summary(added: List<Waypoint>, errors: List<String>): String {
@@ -234,7 +310,7 @@ private fun WaypointCard(
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace,
+                    fontFamily = KibernetykMono,
                     modifier = Modifier.weight(1f)
                 )
                 if (isTarget) {
@@ -243,7 +319,7 @@ private fun WaypointCard(
                         color = FixColors.Green,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace
+                        fontFamily = KibernetykMono
                     )
                     Spacer(Modifier.width(4.dp))
                 }
@@ -262,7 +338,12 @@ private fun WaypointCard(
             if (fix != null) {
                 val d = Geodesy.distanceMeters(fix.latitude, fix.longitude, waypoint.latitude, waypoint.longitude)
                 val b = Geodesy.bearingDeg(fix.latitude, fix.longitude, waypoint.latitude, waypoint.longitude)
-                Small(Format.longDistance(d, units) + " · " + Format.bearing(b) + " " + Geodesy.compassPoint(b), MaterialTheme.colorScheme.onSurfaceVariant)
+                val where = if (arrived(fix, waypoint)) {
+                    "you're here (${Format.longDistance(d, units)})"
+                } else {
+                    Format.longDistance(d, units) + " · " + Format.bearing(b) + " " + Geodesy.compassPoint(b)
+                }
+                Small(where, MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Small(if (isTarget) "tap to stop navigating" else "tap to navigate here", MaterialTheme.colorScheme.onSurfaceVariant)
         }
@@ -271,7 +352,7 @@ private fun WaypointCard(
 
 @Composable
 private fun Small(text: String, color: Color) {
-    Text(text = text, color = color, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    Text(text = text, color = color, fontSize = 11.sp, fontFamily = KibernetykMono)
 }
 
 @Composable
@@ -281,7 +362,7 @@ private fun Label(text: String) {
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 12.sp,
         fontWeight = FontWeight.SemiBold,
-        fontFamily = FontFamily.Monospace,
+        fontFamily = KibernetykMono,
         modifier = Modifier.padding(vertical = 8.dp)
     )
     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
@@ -294,7 +375,7 @@ private fun Note(text: String) {
         text = text,
         fontSize = 11.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        fontFamily = FontFamily.Monospace,
+        fontFamily = KibernetykMono,
         modifier = Modifier.padding(vertical = 4.dp)
     )
 }
@@ -311,6 +392,6 @@ private fun ActionButton(text: String, modifier: Modifier = Modifier, enabled: B
         shape = RoundedCornerShape(8.dp),
         modifier = modifier
     ) {
-        Text(text, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+        Text(text, fontSize = 13.sp, fontFamily = KibernetykMono)
     }
 }

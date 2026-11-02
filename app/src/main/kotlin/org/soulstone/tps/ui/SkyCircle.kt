@@ -26,7 +26,6 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -44,6 +43,7 @@ import org.soulstone.tps.ui.theme.FixColors
 import org.soulstone.tps.ui.theme.SkyColors
 import org.soulstone.tps.ui.theme.color
 import org.soulstone.tps.ui.theme.ringColor
+import org.soulstone.tps.ui.theme.KibernetykMono
 
 /** A waypoint's direction on the ring: the one being navigated to as a triangle, the rest as dots. */
 data class RingMarker(val bearingDeg: Float, val target: Boolean)
@@ -126,10 +126,10 @@ private fun statusLabel(status: GnssEngine.Status): String = when (status) {
 @Composable
 private fun SkyPlot(sky: SkySnapshot, shapes: Boolean, labels: Boolean, heading: State<Float?>?) {
     val measurer = rememberTextMeasurer()
-    val compassStyle = TextStyle(color = SkyColors.GridLabel, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    val compassStyle = TextStyle(color = SkyColors.GridLabel, fontSize = 11.sp, fontFamily = KibernetykMono)
     val northStyle = compassStyle.copy(color = SkyColors.SatelliteLabel)
-    val ringStyle = TextStyle(color = SkyColors.GridLabel, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
-    val labelStyle = TextStyle(color = SkyColors.SatelliteLabel, fontSize = 9.sp, fontFamily = FontFamily.Monospace)
+    val ringStyle = TextStyle(color = SkyColors.GridLabel, fontSize = 9.sp, fontFamily = KibernetykMono)
+    val labelStyle = TextStyle(color = SkyColors.SatelliteLabel, fontSize = 9.sp, fontFamily = KibernetykMono)
     // Predicted first and used last, so the satellites in the fix draw on top.
     val marks = sky.satellites.filter { it.plottable }.sortedByDescending { it.state.ordinal }
 
