@@ -135,7 +135,8 @@ All API levels above were checked against `platforms/android-37.0/data/api-versi
 - **The emulator can't test the sky circle.** AOSP's emulator GNSS HAL
   (`device/generic/goldfish/hals/gnss/GnssHwListener.cpp`) makes up N **GPS-only**
   satellites from the NMEA GGA count. All of them sit at **elevation 0°, azimuth 0°**,
-  C/N0 30, and none are used in the fix. So TPS gets a **demo sky** mode for layout work
+  C/N0 30, none are used in the fix, and their carrier frequency is a GLONASS G1 one
+  (so TPS only names a band when the system actually broadcasts on it). So TPS gets a **demo sky** mode for layout work
   and emulator screenshots. It simulates the real orbits as seen from Singapore, one of
   the places where all seven systems are overhead. The real test is a real phone
   outdoors.
@@ -233,20 +234,23 @@ on by default. Settings can switch back to plain dots.
 org.soulstone.tps
 ├── MainActivity.kt        permission flow, edge-to-edge, MAIN/SETTINGS routing (from OVERWATCH)
 ├── gnss/
-│   ├── GnssEngine.kt      LocationManager GPS_PROVIDER + GnssStatus + NMEA → StateFlows
-│   ├── Sky.kt             Android-free model: Signal → Satellite (bands merged) → ConstellationSummary
-│   ├── Constellation.kt   id ↔ name/operator/colour/prefix; SVID labels (GLONASS FCN, QZSS J##, SBAS → WAAS/EGNOS/…)
-│   ├── Bands.kt           carrier Hz → band, including GLONASS FDMA channels
+│   ├── GnssEngine.kt      LocationManager GPS_PROVIDER + GnssStatus + NMEA (or DemoSky) → one StateFlow
+│   ├── Sky.kt             Android-free model: Signal → Satellite (bands merged) → ConstellationSummary; sky projection
+│   ├── Constellation.kt   id ↔ name/operator/colour/shape/prefix; SVID labels (GLONASS FCN, QZSS J##); SBAS PRN → system
+│   ├── Bands.kt           carrier Hz → band, including GLONASS FDMA channels, and which systems use which band
 │   ├── Nmea.kt            GSA (fix type, PDOP/HDOP/VDOP, NMEA 4.10 system id), GGA (quality, geoid sep.)
-│   ├── ChipInfo.kt        model/year, GnssCapabilities, getGnssSignalTypes() on API 34+
-│   └── DemoSky.kt         synthetic, slowly moving sky for the emulator and screenshots
+│   ├── Dop.kt             DOP from geometry (one clock term per system), for chips without GSA
+│   ├── Fix.kt             Android-free fix, fix tiers, 2D/3D inference
+│   ├── DemoSky.kt         simulated orbits seen from Singapore, for the emulator and screenshots
+│   └── ChipInfo.kt        (v0.2) model/year, GnssCapabilities, getGnssSignalTypes() on API 34+
 ├── data/Settings.kt       SharedPreferences + StateFlows (OVERWATCH pattern)
 └── ui/
-    ├── MainScreen.kt      OVERWATCH layout + Constellations sheet
-    ├── SkyCircle.kt       Compose Canvas sky plot
-    ├── PulseVisuals.kt    idle/searching pulse (from OVERWATCH)
+    ├── MainScreen.kt      OVERWATCH layout + Constellations sheet + POSITION card
+    ├── SkyCircle.kt       Compose Canvas sky plot and the constellation marks
+    ├── PulseVisuals.kt    idle/searching pulse and the fix ring (from OVERWATCH)
+    ├── Format.kt          coordinates, units, durations (Locale.ROOT)
     ├── SettingsScreen.kt
-    └── theme/Theme.kt     OVERWATCH colours + constellation palette
+    └── theme/Theme.kt     OVERWATCH colours, fix-ring tiers, sky colours
 ```
 
 - **Toolchain:** the same as OVERWATCH today: AGP 9.4.1, Kotlin 2.4.21, Gradle 9.8.1,
@@ -273,9 +277,9 @@ org.soulstone.tps
 
 | Version | Contents |
 |---|---|
-| **v0.0** | Scaffold: Gradle (copied from OVERWATCH), LICENSE, README, `.gitignore`, CI (build + unit tests on every push; APK attached to a Release on `v*` tags). `gh repo create KaraZajac/TPS --public`. First green build. |
-| **v0.1.0** | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
-| **v0.2.0** | **Everything the chip can do:** CHIP card, "unsupported vs not in view", per-band detail, MSL altitude, heading-up compass, satellite trails, cold start / TTFF test. |
+| **v0.0** ✓ 2026-11-02 | Scaffold: Gradle (copied from OVERWATCH), LICENSE, README, `.gitignore`, CI (build + unit tests on every push; APK attached to a Release on `v*` tags). `gh repo create KaraZajac/TPS --public`. First green build. |
+| **v0.1.0** built 2026-11-02, awaiting the outdoor phone test | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), MSL height, demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
+| **v0.2.0** | **Everything the chip can do:** CHIP card, "unsupported vs not in view", per-band detail, heading-up compass, satellite trails, cold start / TTFF test. |
 | **v0.3.0** (optional) | Raw measurements: signal codes and AGC per band. **Interference watch**, OVERWATCH-family: AGC drops, C/N0 flattening, GNSS clock vs phone clock, position jumps, with honest limits. Research stretch: **one fix per constellation** (GPS-only vs Galileo-only vs BeiDou-only dots from satellite PVT + pseudoranges), so each nation's answer appears next to the fused one. |
 | **Later** | tps.netslum.io site, F-Droid submission, GPX/NMEA logging. |
 
