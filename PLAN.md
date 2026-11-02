@@ -470,7 +470,8 @@ against the phone's network time; jumps in position or clock. Phones are not sur
 receivers: this catches crude spoofing and jamming, not a careful attacker.
 
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
-`Fix`, `Status` lines) to a file shared through Android's share sheet. TPS adds `SatPvt`
+`Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;
+the system's "Save as" picker on Android 8–9). TPS adds `SatPvt`
 lines, the chip's satellite positions, which GnssLogger doesn't record. It's how the
 decoders get checked against real phones. The file contains your position, and TPS says so.
 

@@ -1,14 +1,21 @@
 package org.soulstone.tps
 
 import android.Manifest
+import android.content.ContentValues
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.content.res.Resources
 import android.graphics.Color
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
 import android.provider.Settings as AndroidSettings
+import android.widget.Toast
+import androidx.annotation.RequiresApi
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.BackHandler
@@ -28,7 +35,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
+import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.soulstone.tps.data.Settings
 import org.soulstone.tps.gnss.GnssEngine
 import org.soulstone.tps.nav.Compass
@@ -80,6 +91,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         askedThisLaunch = savedInstanceState?.getBoolean(KEY_ASKED) ?: false
+        pendingSave = savedInstanceState?.getString(KEY_PENDING_SAVE)
         settings = Settings.get(this)
         engine = GnssEngine.get(this)
         waypoints = WaypointStore.get(this)
@@ -138,7 +150,7 @@ class MainActivity : ComponentActivity() {
                             onFullTracking = { settings.setFullTracking(it) },
                             onRecord = { engine.startRecording(BuildConfig.VERSION_NAME) },
                             onStopRecording = { engine.stopRecording() },
-                            onShare = ::shareRecording,
+                            onSave = ::saveRecording,
                         )
                         MainScreen(
                             state = state,
@@ -184,6 +196,7 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putBoolean(KEY_ASKED, askedThisLaunch)
+        outState.putString(KEY_PENDING_SAVE, pendingSave)
     }
 
     override fun onStart() {
@@ -238,18 +251,42 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Hands a raw-data recording to the app the user picks, read-only, through the share sheet. */
-    private fun shareRecording(name: String) {
+    /**
+     * Saves a raw-data recording to Download/TPS. Android 10+ lets an app add to Downloads
+     * without any permission; on 8–9 that needs storage access, so there the system's own
+     * "Save as" picker is used instead (also permission-free).
+     */
+    private fun saveRecording(name: String) {
         val file = engine.recording(name)
         if (!file.exists()) return
-        val uri = FileProvider.getUriForFile(this, "$packageName.recordings", file)
-        val send = Intent(Intent.ACTION_SEND)
-            .setType("text/plain")
-            .putExtra(Intent.EXTRA_STREAM, uri)
-            .putExtra(Intent.EXTRA_SUBJECT, name)
-            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        runCatching { startActivity(Intent.createChooser(send, "Share raw GNSS recording")) }
+        if (Build.VERSION.SDK_INT >= 29) {
+            lifecycleScope.launch(Dispatchers.IO) {
+                val where = runCatching { Downloads.save(this@MainActivity, file) }.getOrNull()
+                withContext(Dispatchers.Main) { toast(if (where != null) "Saved to $where" else "Couldn't save the recording") }
+            }
+        } else {
+            pendingSave = name
+            runCatching { saveAs.launch(name) }
+        }
     }
+
+    /** The recording waiting on the "Save as" picker (Android 8–9). */
+    private var pendingSave: String? = null
+
+    private val saveAs = registerForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
+        val name = pendingSave
+        pendingSave = null
+        if (uri == null || name == null) return@registerForActivityResult
+        val file = engine.recording(name)
+        lifecycleScope.launch(Dispatchers.IO) {
+            val ok = runCatching {
+                contentResolver.openOutputStream(uri)!!.use { out -> file.inputStream().use { it.copyTo(out) } }
+            }.isSuccess
+            withContext(Dispatchers.Main) { toast(if (ok) "Saved $name" else "Couldn't save the recording") }
+        }
+    }
+
+    private fun toast(text: String) = Toast.makeText(this, text, Toast.LENGTH_LONG).show()
 
     private fun granted(permission: String) =
         ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
@@ -272,10 +309,40 @@ class MainActivity : ComponentActivity() {
         const val FINE = Manifest.permission.ACCESS_FINE_LOCATION
         const val COARSE = Manifest.permission.ACCESS_COARSE_LOCATION
         const val KEY_ASKED = "asked_for_location"
+        const val KEY_PENDING_SAVE = "pending_save"
 
         // androidx's own navigation-bar scrims, which only Android 8–9 draw.
         val LIGHT_SCRIM = Color.argb(0xe6, 0xFF, 0xFF, 0xFF)
         val DARK_SCRIM = Color.argb(0x80, 0x1b, 0x1b, 0x1b)
+    }
+}
+
+/** Android 10+: adds files to the shared Download folder, no permission needed. */
+@RequiresApi(29)
+private object Downloads {
+    /** Copies [file] into Download/TPS and returns where it ended up. */
+    fun save(context: Context, file: File): String {
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/TPS")
+            put(MediaStore.MediaColumns.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("Downloads refused the file")
+        try {
+            resolver.openOutputStream(uri)!!.use { out -> file.inputStream().use { it.copyTo(out) } }
+            values.clear()
+            values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            resolver.delete(uri, null, null)
+            throw e
+        }
+        // Android adds " (1)" when a file of that name is already there.
+        val name = resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: file.name
+        return "Download/TPS/$name"
     }
 }
 

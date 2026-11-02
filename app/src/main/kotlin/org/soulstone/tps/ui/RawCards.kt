@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,6 +32,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -65,7 +67,8 @@ data class RawUi(
     val onFullTracking: (Boolean) -> Unit,
     val onRecord: () -> Unit,
     val onStopRecording: () -> Unit,
-    val onShare: (String) -> Unit,
+    /** Saves a finished recording where the user can reach it (Download/TPS). */
+    val onSave: (String) -> Unit,
 )
 
 /** Systems TPS can decode orbits for so far; the others wait for v0.4. */
@@ -200,7 +203,7 @@ private fun SystemRow(s: SystemReport, offset: Offset3?, prefs: DisplayPrefs, ch
     val detail = when {
         s.solution != null && offset != null ->
             "${s.withOrbit} sats  " + Format.distance(offset.horizontal, prefs.units) + " " + offset.direction() +
-                "  ±" + Format.distance(s.solution.residualRms, prefs.units)
+                spread(s.solution, prefs.units)
         s.solution != null -> "${s.withOrbit} sats  solved"
         s.ranged == 0 -> "${s.signals} signals, none timed yet"
         s.withOrbit == 0 && c !in DECODED && !chipPositions -> "${s.ranged} timed · orbit decoding comes in v0.4"
@@ -221,11 +224,19 @@ private fun SystemRow(s: SystemReport, offset: Offset3?, prefs: DisplayPrefs, ch
     }
 }
 
+/**
+ * The residuals' spread, "  ±x m", when the fix had satellites to spare. With exactly as many
+ * satellites as unknowns (position plus a clock per system) the fit is perfect by construction,
+ * so a "±0.0 m" would say nothing; then it's left out.
+ */
+private fun spread(s: Solution, units: org.soulstone.tps.data.Settings.Units): String =
+    if (s.satellites.size > 3 + s.clocks.size) "  ±" + Format.distance(s.residualRms, units) else ""
+
 @Composable
 private fun CombinedRow(c: Solution, offset: Offset3?, prefs: DisplayPrefs) {
-    val detail = "${c.satellites.size} sats  " + (offset?.let {
-        Format.distance(it.horizontal, prefs.units) + " " + it.direction() + "  "
-    } ?: "") + "±" + Format.distance(c.residualRms, prefs.units)
+    val detail = "${c.satellites.size} sats" + (offset?.let {
+        "  " + Format.distance(it.horizontal, prefs.units) + " " + it.direction()
+    } ?: "") + spread(c, prefs.units)
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
         Box(
             Modifier
@@ -413,13 +424,13 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
                     ) { raw.onStopRecording() }
                 }
                 rec.last?.takeIf { rec.active == null }?.let { name ->
-                    SmallButton("Share recording", modifier = Modifier.weight(1f)) { raw.onShare(name) }
+                    SmallButton("Save recording", modifier = Modifier.weight(1f)) { raw.onSave(name) }
                 }
             }
             Spacer(Modifier.height(4.dp))
             Note(
-                "Recordings are in Google's GnssLogger format, for checking TPS against other tools. " +
-                    "They contain your position: share them only with people you trust."
+                "Save puts the recording in Download/TPS, in Google's GnssLogger format plus the chip's " +
+                    "satellite positions. It contains your position: share it only with people you trust."
             )
         }
     }
@@ -447,8 +458,11 @@ private fun SmallButton(text: String, modifier: Modifier = Modifier, enabled: Bo
             contentColor = if (color != null) Color.White else MaterialTheme.colorScheme.onSurface
         ),
         shape = RoundedCornerShape(8.dp),
+        // Kibernetyk Mono is wide: Material's 24 dp side padding cut "Save recording" to "Save"
+        // when two buttons share a row.
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
         modifier = modifier
     ) {
-        Text(text, fontSize = 12.sp, fontFamily = KibernetykMono, maxLines = 1)
+        Text(text, fontSize = 12.sp, fontFamily = KibernetykMono, maxLines = 1, softWrap = false, overflow = TextOverflow.Ellipsis)
     }
 }

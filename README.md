@@ -61,7 +61,7 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
 - **CHIP card**: the GNSS hardware, what it can do (raw measurements, navigation
   messages, satellite positions, carrier phase…), the signals it supports, and a
   **raw-data recorder** that writes Google's GnssLogger format (plus the chip's satellite
-  positions) and shares the file.
+  positions) and saves the file to `Download/TPS`.
 - **Constellations sheet** (tap the circle): all seven systems, each with who runs it,
   satellites in view and used, its bands, and a row per satellite. A POSITION card has
   the rest: both coordinate formats, geohash, ellipsoid and sea-level height,
