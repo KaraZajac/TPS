@@ -537,7 +537,10 @@ what else it could be, findings held 20 s (caution) or 30 s (alert) after their 
   GLONASS's FDMA carriers share one). Kara's Sony fills that field (dev.7 recording,
   indoors): one value per system and band, shared by every satellite in it, steady to
   ±0.7 dB over 5 minutes; GPS L1 about −64 dB and Galileo E1 about −68 dB on the same
-  frequency, so the key is system and band, not frequency alone;
+  frequency, so the key is system and band, not frequency alone. In the basement 20
+  minutes later (2 satellites tracked a second instead of 6, no fix from the chip) the
+  gain was within 0.6 dB of those values (GLONASS 1.3 dB, from 6 readings): blocking the
+  sky doesn't move it, which is what lets steady gain mean "blocked", not "jammed";
 - *signal pattern*: 8+ signals within ±2 dB for 10 rounds, or a median above 48 dB-Hz;
 - *receiver clock*: a common jump of every pseudorange without a reported reset;
 - *measurements fit*: 30% of pseudoranges rejected for 5 rounds;
