@@ -4,6 +4,7 @@ import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
 import kotlin.math.sin
+import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -115,6 +116,104 @@ class SuperPositionTest {
         assertEquals(-0.5, f.codeMinusDopplerMps.getValue(Constellation.GALILEO), 0.05)
         assertEquals(0.0, f.codeMinusDopplerMps.getValue(Constellation.GPS), 0.05)
         assertEquals(0.0, f.codeMinusDopplerMps.getValue(Constellation.GLONASS), 0.05)
+    }
+
+    @Test
+    fun robustWeightsPullLessOnBiasedSatellites() {
+        // Every fourth satellite 8 m long from second 30 (reflections): inside the gate.
+        val biased = Sky(fault = { t, _, svid -> if (t >= 30 && svid % 4 == 1) 8.0 else 0.0 })
+        fun mean(sky: Sky, robust: Boolean) = SyntheticSky.filter(sky, 180, robust = robust).drop(60).map { (f, t) -> horizontalError(f!!, t) }.average()
+        val plain = mean(biased, false)
+        val robust = mean(biased, true)
+        assertTrue("robust %.2f m against plain %.2f m".format(robust, plain), robust < plain * 0.9)
+        // On a clean sky they cost nothing.
+        assertTrue(mean(Sky(), true) <= mean(Sky(), false) * 1.1)
+    }
+
+    @Test
+    fun aPhoneAtRestHoldsStillAndItsHeightSettles() {
+        fun heightRms(m: Motion) = SyntheticSky.filter(Sky(), 300, motion = { m }).drop(60)
+            .map { (f, t) -> Solver.offset(Geo.toGeodetic(t), f!!.ecef)[2] }.let { v -> sqrt(v.sumOf { it * it } / v.size) }
+        val unknown = heightRms(Motion.UNKNOWN)
+        val still = heightRms(Motion.STILL)
+        assertTrue("at rest %.2f m against %.2f m".format(still, unknown), still < unknown / 2)
+        val last = SyntheticSky.filter(Sky(), 120, motion = { Motion.STILL }).last().first!!
+        assertTrue(last.still)
+        assertEquals(0.0, last.speedMps, 0.05)
+    }
+
+    @Test
+    fun aWholeSkyTakeoverIsHeldOffAtRest() {
+        val r = SyntheticSky.filter(Sky(spoof = { t, _ -> if (t >= 60) 5_000.0 to 0.0 else null }), 240, motion = { Motion.STILL })
+        val (f, truth) = r.last()
+        assertEquals(Suspect.DRAGGED, f!!.suspect)
+        assertTrue(f.usable)
+        assertTrue("off by ${horizontalError(f, truth)} m", horizontalError(f, truth) < 5.0)
+        assertEquals(5_000.0, f.suspectMoveM, 50.0)
+    }
+
+    @Test
+    fun withoutMotionSensorsATakeoverIsHeldUntilItCouldBeReached() {
+        val r = SyntheticSky.filter(Sky(spoof = { t, _ -> if (t >= 60) 5_000.0 to 0.0 else null }), 240)
+        val (held, truth) = r[100]
+        assertEquals(Suspect.OUT_OF_REACH, held!!.suspect)
+        assertTrue("off by ${horizontalError(held, truth)} m", horizontalError(held, truth) < 10.0)
+        // 5 km is within 50 m/s after about 100 s: then TPS takes the signals' place.
+        val last = r.last().first!!
+        assertEquals(null, last.suspect)
+        assertEquals(1, last.released)
+        assertEquals(5_000.0, last.lastReleaseMoveM!!, 100.0)
+    }
+
+    @Test
+    fun aDragWhileThePhoneLiesStillIsHeldOff() {
+        // Every signal timed for a place moving east at 1 m/s from second 60, Doppler to match.
+        val r = SyntheticSky.filter(Sky(spoof = { t, _ -> if (t >= 60) (t - 60) * 1.0 to 0.0 else null }), 300, motion = { Motion.STILL })
+        // Pulled at most about the drag margin before going back to rest.
+        val worst = r.drop(60).maxOf { (f, t) -> horizontalError(f!!, t) }
+        assertTrue("pulled $worst m", worst <= 30.0)
+        val (f, truth) = r.last()
+        assertEquals(Suspect.DRAGGED, f!!.suspect)
+        assertTrue(horizontalError(f, truth) < 5.0)
+        assertEquals(240.0, f.suspectMoveM, 20.0)
+    }
+
+    @Test
+    fun aSpooferThatStopsEndsTheHold() {
+        // A minute of a 5 km takeover, then the honest sky again; the phone at rest throughout.
+        val r = SyntheticSky.filter(Sky(spoof = { t, _ -> if (t in 60 until 120) 5_000.0 to 0.0 else null }), 180, motion = { Motion.STILL })
+        val (f, truth) = r.last()
+        assertEquals(null, f!!.suspect)
+        assertEquals(0, f.released)
+        assertTrue(horizontalError(f, truth) < 3.0)
+    }
+
+    @Test
+    fun pickedUpDuringAHoldItLetsGoOnceThePlaceIsWithinReach() {
+        val r = SyntheticSky.filter(
+            Sky(spoof = { t, _ -> if (t >= 60) 5_000.0 to 0.0 else null }), 300,
+            motion = { k -> if (k < 150) Motion.STILL else Motion.MOVING },
+        )
+        assertEquals(Suspect.DRAGGED, r[149].first!!.suspect)
+        assertEquals(1, r.last().first!!.released)
+    }
+
+    @Test
+    fun aSmoothRideIsNotTakenForRest() {
+        // 20 m/s east while the motion sensors feel nothing (a very smooth ride).
+        val r = SyntheticSky.filter(Sky(path = Path { t -> 20.0 * t to 0.0 }), 120, motion = { Motion.STILL })
+        assertTrue(r.none { it.first?.suspect != null || it.first?.still == true })
+        assertTrue(r.drop(20).all { (f, t) -> horizontalError(f!!, t) < 3.0 })
+    }
+
+    @Test
+    fun atRestThePositionHoldsThroughALoss() {
+        val loss = Sky(keep = { t, _, _ -> t < 60 || t >= 150 })
+        val still = SyntheticSky.filter(loss, 200, motion = { Motion.STILL })
+        assertTrue((60 until 150).all { still[it].first?.usable == true })
+        assertTrue(horizontalError(still[149].first!!, still[149].second) < 2.0)
+        // Without the sensors it lets go after 30 s, as before.
+        assertTrue(SyntheticSky.filter(loss, 200)[100].first?.usable != true)
     }
 
     @Test

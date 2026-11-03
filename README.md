@@ -51,11 +51,19 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   fixes wandered 18 m and 79 m. It needs raw measurements and orbits (below). It takes
   over only once settled (10 seconds, ±15 m or better), holds its position through up to
   30 s of lost or jammed signal (saying so), and starts from the chip's fix when there is one.
+  Measurements well off the fit count for less. With the phone at rest (its motion sensors,
+  no permission needed) the velocity is held at zero, so the position stops wandering and the
+  height settles, and the position holds through any loss of signal.
+- **Holding instead of following**: if the signals put TPS somewhere it couldn't have
+  reached (nowhere while the phone lies still, 50 m/s otherwise), or move it while the phone
+  lies still, TPS keeps its position and says "holding", until the signals agree with it
+  again or the new place comes within reach.
 - **Integrity warnings**: a triangle with `!` on the sky circle, orange for a caution and
   red for an alert, when TPS sees signs of **jamming or spoofing**, with a line saying what
   and the full list in the INTEGRITY card. It checks whether one system disagrees with the
   others (a fake GPS signal is the classic attack; TPS keeps to the honest systems), whether
-  the position jumps faster than anything on the ground, whether TPS starts somewhere it
+  the position jumps faster than anything on the ground, whether the signals move TPS while
+  the phone lies still (a drag-off), whether TPS starts somewhere it
   couldn't have reached since it last trusted its fix (or at a GNSS time the phone's own
   clock disagrees with), whether GNSS time jumps against the phone's steady clock or sits
   far from Android's network time, whether another app is supplying the chip's position (a

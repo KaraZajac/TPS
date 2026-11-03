@@ -27,7 +27,7 @@ class IntegrityTest {
      * evidence (the phone's clocks are on it already: GNSS time agrees with them).
      */
     private fun watch(
-        sky: Sky, seconds: Int = 90, last: Remembered? = null,
+        sky: Sky, seconds: Int = 90, last: Remembered? = null, motion: (Int) -> Motion = { Motion.UNKNOWN },
         input: (Int, IntegrityInput) -> IntegrityInput = { _, i -> i },
     ): Watch {
         val filter = SuperPosition()
@@ -36,7 +36,7 @@ class IntegrityTest {
         val reports = ArrayList<IntegrityReport>()
         val fixes = ArrayList<Pair<FusedFix?, Ecef>>()
         for ((k, r) in SyntheticSky.rounds(sky, seconds).withIndex()) {
-            val f = filter.step(r.clock, r.observations, SyntheticSky.start, null, r.tow)
+            val f = filter.step(r.clock, r.observations, SyntheticSky.start, null, r.tow, motion = motion(k))
             fixes += f to r.truth
             val elapsedMs = BOOT_ELAPSED_MS + k * 1_000L
             reports += monitor.update(
@@ -54,6 +54,7 @@ class IntegrityTest {
                         elapsedMs = elapsedMs,
                         wallMs = elapsedMs + GNSS_MINUS_ELAPSED_MS,
                         bootCount = BOOT,
+                        motion = motion(k),
                     ),
                 )
             )
@@ -98,13 +99,58 @@ class IntegrityTest {
     }
 
     @Test
-    fun aWholeSkyTakeoverShowsAsAJump() {
-        // From second 60, every signal is timed for a place 5 km east.
+    fun aWholeSkyTakeoverIsHeldOffAndCalledOut() {
+        // From second 60, every signal is timed for a place 5 km east. No motion sensors.
         val w = watch(Sky(spoof = { t, _ -> if (t >= ATTACK) 5_000.0 to 0.0 else null }))
         val at = w.first(Check.JUMPS, Severity.ALERT)
-        assertNotNull("no jump raised", at)
+        assertNotNull("not raised", at)
         assertTrue("caught at $at", at!! <= ATTACK + 8)
-        assertTrue(w.reports[at].headline!!.text, w.reports[at].headline!!.text.contains("5.0 km"))
+        val text = w.reports[at].headline!!.text
+        assertTrue(text, text.contains("5.0 km") && text.contains("holds its last position"))
+        // TPS didn't follow.
+        val (f, truth) = w.fixes.last()
+        assertTrue(Solver.offset(Geo.toGeodetic(truth), f!!.ecef).let { hypot(it[0], it[1]) } < 10.0)
+    }
+
+    @Test
+    fun aTakeoverAtRestIsHeldOffForAsLongAsItLasts() {
+        val w = watch(Sky(spoof = { t, _ -> if (t >= ATTACK) 5_000.0 to 0.0 else null }), 180, motion = { Motion.STILL })
+        val at = w.first(Check.MOTION, Severity.ALERT)
+        assertNotNull("not raised", at)
+        assertTrue("caught at $at", at!! <= ATTACK + 5)
+        assertTrue(w.result(at, Check.MOTION).text.contains("TPS holds where the phone came to rest"))
+        // Still up two minutes later, with TPS where the phone lies.
+        assertEquals(Severity.ALERT, w.reports.last().level)
+        val (f, truth) = w.fixes.last()
+        assertTrue(Solver.offset(Geo.toGeodetic(truth), f!!.ecef).let { hypot(it[0], it[1]) } < 5.0)
+        assertEquals("phone at rest", w.result(ATTACK - 1, Check.MOTION).text.substringBefore(";"))
+    }
+
+    @Test
+    fun aSlowDragAtRestIsACautionThenAnAlert() {
+        // 1 m/s east from second 60: a caution once it's beyond reflections' reach, an alert past 200 m.
+        val w = watch(Sky(spoof = { t, _ -> if (t >= ATTACK) (t - ATTACK) * 1.0 to 0.0 else null }), 300, motion = { Motion.STILL })
+        val caution = w.first(Check.MOTION, Severity.CAUTION)
+        val alert = w.first(Check.MOTION, Severity.ALERT)
+        assertNotNull(caution)
+        assertNotNull(alert)
+        assertTrue("caution at $caution, alert at $alert", caution!! < alert!! && alert in ATTACK + 190..ATTACK + 230)
+    }
+
+    @Test
+    fun withoutMotionSensorsTakingTheSignalsPlaceLeavesACaution() {
+        val w = watch(Sky(spoof = { t, _ -> if (t >= ATTACK) 5_000.0 to 0.0 else null }), 240)
+        val last = w.result(239, Check.JUMPS)
+        assertEquals(Severity.CAUTION, last.severity)
+        assertTrue(last.text, last.text.contains("may be false"))
+    }
+
+    @Test
+    fun aSmoothRideRaisesNothing() {
+        // 20 m/s east while the motion sensors feel nothing.
+        val w = watch(Sky(path = Path { t -> 20.0 * t to 0.0 }), 120, motion = { Motion.STILL })
+        val raised = w.reports.withIndex().filter { it.value.level != Severity.OK }
+        assertTrue("raised ${raised.firstOrNull()?.let { "at ${it.index}: ${it.value.headline}" }}", raised.isEmpty())
     }
 
     @Test

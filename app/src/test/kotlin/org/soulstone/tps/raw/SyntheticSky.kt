@@ -104,8 +104,17 @@ object SyntheticSky {
             val signals = ArrayList<SignalLevel>()
             for ((system, eph) in constellations) {
                 if (!sky.keep(k, system, eph.svid)) continue
-                // A spoofer times its signals for somewhere else.
-                val receiver = sky.spoof(k, system)?.let { position(sky.path, t, it) } ?: truth
+                // A spoofer times its signals for somewhere else, and (a competent one) gives them
+                // the Doppler of that place's motion.
+                val fake = sky.spoof(k, system)
+                val receiver = fake?.let { position(sky.path, t, it) } ?: truth
+                val receiverVelocity = if (fake == null) {
+                    velocity
+                } else {
+                    val after = position(sky.path, t + 1, sky.spoof(k + 1, system) ?: fake)
+                    val before = position(sky.path, t - 1, sky.spoof(k - 1, system) ?: fake)
+                    Ecef((after.x - before.x) / 2, (after.y - before.y) / 2, (after.z - before.z) / 2)
+                }
                 var tx = tow - 0.075
                 var sat = Orbits.state(eph, tx).position
                 repeat(4) {
@@ -125,7 +134,7 @@ object SyntheticSky {
                 val bias = if (system == Constellation.GLONASS) sky.glonassBias else 0.0
                 val pseudorange = range + reported + bias - Pseudoranges.C * dts + tropo +
                     sky.codeNoise * random.nextGaussian() + sky.fault(k, system, eph.svid)
-                val closing = ((satVelocity.x - velocity.x) * d.x + (satVelocity.y - velocity.y) * d.y + (satVelocity.z - velocity.z) * d.z) / r
+                val closing = ((satVelocity.x - receiverVelocity.x) * d.x + (satVelocity.y - receiverVelocity.y) * d.y + (satVelocity.z - receiverVelocity.z) * d.z) / r
                 val strength = sky.cn0(k, system, Math.toDegrees(el), random)
                 observations += Observation(
                     system, eph.svid, sat, dts, pseudorange, 3.0,
@@ -154,9 +163,12 @@ object SyntheticSky {
         }
     }
 
-    /** The super position over [seconds] of [sky]: its answer and the true position, each second. */
-    fun filter(sky: Sky, seconds: Int): List<Pair<FusedFix?, Ecef>> {
-        val filter = SuperPosition()
-        return rounds(sky, seconds).map { r -> filter.step(r.clock, r.observations, start, null, r.tow) to r.truth }
+    /**
+     * The super position over [seconds] of [sky]: its answer and the true position, each second.
+     * [motion] is what the motion sensors say at each second.
+     */
+    fun filter(sky: Sky, seconds: Int, motion: (Int) -> Motion = { Motion.UNKNOWN }, robust: Boolean = true): List<Pair<FusedFix?, Ecef>> {
+        val filter = SuperPosition(robust)
+        return rounds(sky, seconds).mapIndexed { k, r -> filter.step(r.clock, r.observations, start, null, r.tow, motion = motion(k)) to r.truth }
     }
 }

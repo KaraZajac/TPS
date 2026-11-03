@@ -4,6 +4,10 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.location.GnssMeasurementRequest
 import android.location.GnssMeasurementsEvent
 import android.location.GnssNavigationMessage
@@ -44,6 +48,7 @@ import org.soulstone.tps.raw.IntegrityMonitor
 import org.soulstone.tps.raw.IntegrityReport
 import org.soulstone.tps.raw.SignalLevel
 import org.soulstone.tps.raw.Geodetic
+import org.soulstone.tps.raw.MotionDetector
 import org.soulstone.tps.raw.NavMessage
 import org.soulstone.tps.raw.OwnFixEngine
 import org.soulstone.tps.raw.PvtRead
@@ -137,6 +142,22 @@ class GnssEngine private constructor(context: Context) {
     /** Where and when TPS last trusted its own position, for the next start-up's check. */
     private val lastTrusted = LastTrusted(app)
     private var rememberedAtMs: Long? = null
+
+    /** Whether the phone lies still, from its accelerometer and gyroscope. GNSS thread only. */
+    private val motion = MotionDetector()
+    private val sensors: SensorManager? = app.getSystemService(SensorManager::class.java)
+    private val motionListener = object : SensorEventListener {
+        override fun onSensorChanged(e: SensorEvent) {
+            val now = SystemClock.elapsedRealtimeNanos()
+            val v = e.values
+            when (e.sensor.type) {
+                Sensor.TYPE_ACCELEROMETER -> motion.accel(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+                Sensor.TYPE_GYROSCOPE -> motion.gyro(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+            }
+        }
+
+        override fun onAccuracyChanged(sensor: Sensor, accuracy: Int) = Unit
+    }
 
     /** Android's boot count: the monotonic clock only counts honestly within one boot. */
     private val bootCount: Int? = runCatching {
@@ -236,6 +257,8 @@ class GnssEngine private constructor(context: Context) {
         tickJob = null
         demoJob?.cancel()
         demoJob = null
+        runCatching { sensors?.unregisterListener(motionListener) }
+        handler.post { motion.clear() }
         real?.let { r ->
             lm?.let { m ->
                 runCatching { m.removeUpdates(r.location) }
@@ -326,6 +349,12 @@ class GnssEngine private constructor(context: Context) {
         handler.post {
             integrity.reset()
             integrity.startSession(lastTrusted.load())
+        }
+        // The motion sensors, for static mode and the checks: no permission needed, 50 Hz.
+        sensors?.let { sm ->
+            for (type in intArrayOf(Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_GYROSCOPE)) {
+                sm.getDefaultSensor(type)?.let { runCatching { sm.registerListener(motionListener, it, SensorManager.SENSOR_DELAY_GAME, handler) } }
+            }
         }
         val on = LocationManagerCompat.isLocationEnabled(m) && m.isProviderEnabled(LocationManager.GPS_PROVIDER)
         update(id) { it.copy(status = if (on) Status.RUNNING else Status.LOCATION_OFF) }
@@ -418,13 +447,15 @@ class GnssEngine private constructor(context: Context) {
                 // A mock location (another app's) is neither a start nor a reference.
                 val chipFix = s.chipFix?.takeIf { s.chipFixValid && !it.mock }
                 val chip = chipFix?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
+                val moving = motion.reading(SystemClock.elapsedRealtimeNanos())
+                recorder.motion(moving)
                 // Defensive: one odd measurement mustn't take down the GNSS thread.
-                val report = runCatching { ownFix.solve(epoch, chip, s.sky, chipFix?.accuracyM?.toDouble()) }.getOrNull()
+                val report = runCatching { ownFix.solve(epoch, chip, s.sky, chipFix?.accuracyM?.toDouble(), moving.motion) }.getOrNull()
                 val withPvt = epoch.measurements.mapNotNull { it.pvt }
                 // The super position, as the fix TPS shows; dropped as soon as it isn't usable.
                 val tps = if (report == null) s.tpsFix else report.fused?.takeIf { it.usable }?.let { fusedToFix(it, epoch.clock, s.chipFix) }
                 if (report != null) tps?.let { recorder.tpsFix(it) }
-                val checks = runCatching { integrity.update(integrityInput(epoch, report?.fused, s, chip)) }.getOrNull()
+                val checks = runCatching { integrity.update(integrityInput(epoch, report?.fused, s, chip).copy(motion = moving.motion)) }.getOrNull()
                 report?.fused?.let { f -> if (checks?.level == Severity.OK) remember(f, chipFix) }
                 checks?.let { recorder.integrity(it) }
                 update(id) {

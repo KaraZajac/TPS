@@ -391,6 +391,8 @@ private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
         // Whose position this is: TPS's own (the super position) or the chip's.
         val title = when {
             fix == null || state.demo -> "position"
+            // Not following the signals: holding where it was.
+            state.fixSource == FixSource.TPS && state.raw.report?.fused?.suspect != null -> "position · TPS · holding"
             state.fixSource == FixSource.TPS -> "position · TPS"
             else -> "position · chip"
         }

@@ -41,6 +41,8 @@ class RecordingReplayTest {
         val agcLines = HashMap<Long, MutableList<Agc>>()
         // What the phone's own integrity checks showed (dev.8 on): utcTimeMillis, Level, Check, Text.
         val phoneIntegrity = ArrayList<List<String>>()
+        // The motion sensors' verdict (dev.9 on), by wall time.
+        val motionLines = sortedMapOf<Long, Motion>()
         File(path).forEachLine { line ->
             if (line.startsWith("# ")) {
                 val kind = line.removePrefix("# ").substringBefore(",")
@@ -69,6 +71,7 @@ class RecordingReplayTest {
                 }
                 "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
                 "Integrity" -> phoneIntegrity += values
+                "Motion" -> motionLines[values[0].toLong()] = runCatching { Motion.valueOf(values[1]) }.getOrDefault(Motion.UNKNOWN)
                 "Agc" -> agcLines.getOrPut(values[0].toLong()) { ArrayList() } +=
                     Agc(Constellation.fromAndroid(values[1].toInt()), values[2].toDouble().toLong(), values[3].toDouble())
             }
@@ -151,7 +154,13 @@ class RecordingReplayTest {
         val findings = LinkedHashSet<String>()
         var worst = Severity.OK
         var lastFused: FusedFix? = null
+        var held = 0
+        var downweighted = 0
+        val motionSeen = HashMap<Motion, Int>()
         for (m in moments) {
+            // What the motion sensors said at this round (the last verdict at or before it).
+            val motion = m.wallMs?.let { w -> motionLines.headMap(w + 1).entries.lastOrNull()?.value } ?: Motion.UNKNOWN
+            motionSeen.merge(motion, 1, Int::plus)
             val nearest = fixes.minByOrNull { kotlin.math.abs(it.utcMs - m.utcMs) }?.takeIf { kotlin.math.abs(it.utcMs - m.utcMs) <= 600 }
             val chip = nearest?.at
             val statusRows = status.headMap(m.utcMs + 1).entries.lastOrNull()?.value
@@ -165,7 +174,7 @@ class RecordingReplayTest {
                     )
                 })
             }
-            val report = engine.solve(m.epoch, chip, sky, nearest?.accuracyM)
+            val report = engine.solve(m.epoch, chip, sky, nearest?.accuracyM, motion)
             if (chip != null) report.combined?.let { snapshot += Solver.offset(chip, it.ecef).let { e -> hypot(e[0], e[1]) } }
             // The integrity checks, fed as the app feeds them.
             val integrity = monitor.update(
@@ -178,6 +187,7 @@ class RecordingReplayTest {
                         )
                     }.filter { it.cn0DbHz > 0 },
                     agc = m.epoch.agc,
+                    motion = motion,
                     fused = report.fused,
                     chip = chip,
                     chipAccuracyM = nearest?.accuracyM,
@@ -193,6 +203,8 @@ class RecordingReplayTest {
             val f = report.fused ?: continue
             lastFused = f
             rejected += f.rejected
+            downweighted += f.downweighted
+            if (f.suspect != null) held++
             if (f.usable && chip != null) {
                 usable++
                 val e = Solver.offset(chip, f.ecef)
@@ -226,6 +238,8 @@ class RecordingReplayTest {
         println("receiver gain: " + moments.count { it.epoch.agc.isNotEmpty() }.let { n ->
             if (n == 0) "not in this recording" else "in $n of ${moments.size} rounds" + if (moments.any { it.epoch.agcFromSignals }) " (per-measurement field)" else ""
         })
+        println("motion: " + (if (motionLines.isEmpty()) "not in this recording" else motionSeen.entries.joinToString { "${it.key} ${it.value}" }) +
+            "; held against suspect signals in $held rounds, holds that ended by following: ${lastFused?.released ?: 0}; measurements weighed less: $downweighted")
         println("multipath flagged on " + moments.sumOf { m -> m.epoch.measurements.count { it.multipath == 1 } } + " of " + moments.sumOf { it.epoch.measurements.size } + " measurements")
         if (phoneIntegrity.isNotEmpty()) {
             val t0 = moments.firstOrNull()?.wallMs ?: 0L

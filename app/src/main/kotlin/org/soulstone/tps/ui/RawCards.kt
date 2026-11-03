@@ -102,11 +102,16 @@ private fun FusedRow(f: FusedFix?, offset: Offset3?, prefs: DisplayPrefs, measur
         // Indoors the chip may hand over only a couple of satellites at a time.
         f == null -> "needs 4 satellites measured at once ($measured now)"
         !f.usable && f.updates < FusedFix.SETTLE_UPDATES -> "settling (${f.updates} of ${FusedFix.SETTLE_UPDATES})"
+        !f.usable && f.suspect != null -> "not following suspect signals (${f.suspectForS.toInt()} s)"
         !f.usable -> "lost the satellites ${f.sinceUpdateS.toInt()} s ago"
+        // Holding against signals that put it out of reach, or moved it while the phone lay still.
+        f.suspect != null -> "holding: signals suspect (${f.suspectForS.toInt()} s)" +
+            "  ±" + Format.distance(f.horizontalAccuracyM, prefs.units)
         else -> "${f.satellites} sats" +
             (offset?.let { "  " + Format.distance(it.horizontal, prefs.units) + " " + it.direction() } ?: "") +
             "  ±" + Format.distance(f.horizontalAccuracyM, prefs.units) +
-            (if (f.rejected > 0) "  ${f.rejected} left out" else "")
+            (if (f.rejected > 0) "  ${f.rejected} left out" else "") +
+            (if (f.still) "  at rest" else "")
     }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
         Box(

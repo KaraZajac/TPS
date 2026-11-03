@@ -578,6 +578,46 @@ claims (it held in every round of all six recordings). Height
 moved by a few metres, within its noise; it is still the weak part. Without ground truth
 these are distances from the chip, not errors.
 
+**Resisting, not just detecting (0.3.0-dev.9).**
+- *Robust update*: within the 5σ gate, pseudoranges and Doppler more than 1.5σ off the
+  solution count for less (Huber weights, k/|e|), re-solved from the same prediction up to
+  three times. Convex, so it can't run away. Synthetic sky with every fourth satellite 8 m
+  long: mean error 2.89 → 2.28 m; a clean sky loses nothing (0.41 → 0.35 m). Kara's
+  recordings: median distance from the chip 3.9 / 2.2 / 3.3 m (was 4.2 / 2.3 / 3.9), worst
+  within a metre either way; about one measurement a second weighed less outdoors, none
+  indoors (where the noise model is about 3× too cautious).
+- *Motion sensors* (`MotionDetector`): accelerometer and gyroscope at 50 Hz, no permission.
+  Still: for 2 s, every accelerometer axis within 0.05 m/s² of its mean and rotation under
+  0.02 rad/s. Per axis, because a smooth acceleration tilts gravity without changing its size.
+  Recordings get `Motion` lines.
+- *Static mode*: still, with the signals barely moving (under 0.5 m/s), the velocity is held
+  at zero (σ 0.05 m/s). Synthetic height RMS 1.14 → 0.25 m. At rest the position also holds
+  through a loss of signal with no 30 s limit.
+- *Holding, out of reach*: when most measurements stop fitting, the filter restarts only at a
+  place within reach: 100 m + 3σ + 50 m/s for each second the phone may have moved since the
+  last good update (none while the sensors feel still; all of them without sensors). Else it
+  holds: the position stays (shown while ±100 m or better), only the clock follows the
+  signals, and the hold ends when they fit the held position again (3 rounds, 3 in 4 inside
+  the gate, median NIS ≤ 2) or the new place comes within reach. TPS then takes it, with a
+  5-minute caution that it may be false.
+- *Holding, at rest*: where the phone came to rest (sensors still, signals under 0.5 m/s,
+  TPS's position shown) is kept across restarts until the sensors feel motion or a 30 s gap.
+  The filter mustn't wander from it beyond max(25 m, 3σ then), nor the signals' own snapshot
+  beyond max(25 m, 3σ then, 3 × its HDOP × residual RMS); otherwise TPS goes back there and
+  holds. A disagreement within that margin just re-centres it there.
+- Warnings: *motion agrees* (new): caution below 200 m, which reflections can manage indoors,
+  alert beyond; *position jumps*: out of reach (alert beyond 200 m), and the caution when a
+  hold ends by following. The main screen says "position · TPS · holding".
+- Synthetic results (`SuperPositionTest`, `IntegrityTest`): a 5 km whole-sky takeover is held
+  for as long as the phone lies still; without motion sensors it's held ~90 s, then followed
+  with the caution; a 1 m/s drag at rest pulls TPS at most ~25 m before it snaps back and
+  holds (caution, alert past 200 m); a spoofer that stops ends the hold quietly; picked up
+  mid-hold, TPS lets go once the place is within reach; a smooth 20 m/s ride with the
+  sensors feeling still triggers nothing, because rest needs the signals to agree first.
+- Limits: a drag that starts while the phone moves can't be told from real motion; a very
+  smooth start with the phone perfectly still (a ship) could read as a drag, and the warning
+  says so; the thresholds haven't met real motion data yet.
+
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;
 the system's "Save as" picker on Android 8–9). TPS adds `SatPvt`

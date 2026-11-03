@@ -3,6 +3,7 @@ package org.soulstone.tps.raw
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -61,6 +62,22 @@ data class FusedFix(
      * constant one on a Xiaomi Mi 8).
      */
     val codeMinusDopplerMps: Map<Constellation, Double> = emptyMap(),
+    /** Static mode this round: the phone lay still, so the velocity was held at zero. */
+    val still: Boolean = false,
+    /**
+     * Holding instead of following the signals, and why: they put TPS farther than it could
+     * have gone, or they moved it while the phone lay still. Null while all is well.
+     */
+    val suspect: Suspect? = null,
+    /** How far the signals would have moved TPS, metres, and for how long it has held, seconds. */
+    val suspectMoveM: Double = 0.0,
+    val suspectForS: Double = 0.0,
+    /** Holds that ended with TPS taking the signals' position once it was within reach; for the latest, after how long and how far. */
+    val released: Int = 0,
+    val lastReleaseAfterS: Double? = null,
+    val lastReleaseMoveM: Double? = null,
+    /** Measurements this round that counted for less because they sat well off the fit. */
+    val downweighted: Int = 0,
 ) {
     val speedMps: Double get() = sqrt(velocityEast * velocityEast + velocityNorth * velocityNorth)
 
@@ -68,8 +85,8 @@ data class FusedFix(
     val bearingDeg: Double?
         get() = if (speedMps < MOVING_MPS) null else (Math.toDegrees(atan2(velocityEast, velocityNorth)) + 360) % 360
 
-    /** Holding a predicted position: no measurement fitted for a while (jamming, a tunnel). */
-    val holding: Boolean get() = sinceUpdateS > 2.5
+    /** Holding a predicted position: no measurement fitted for a while (jamming, a tunnel), or the signals are suspect. */
+    val holding: Boolean get() = sinceUpdateS > 2.5 || suspect != null
 
     companion object {
         const val MOVING_MPS = 0.5
@@ -79,7 +96,15 @@ data class FusedFix(
         /** Once shown: held this long without measurements, while it stays this accurate. */
         const val HOLD_S = 30.0
         const val HOLD_ACCURACY_M = 50.0
+        /** Holding against suspect signals: shown for as long as it's this good (no time limit). */
+        const val SUSPECT_HOLD_ACCURACY_M = 100.0
     }
+}
+
+/** Why TPS holds its position instead of following the signals. */
+enum class Suspect(val label: String) {
+    OUT_OF_REACH("farther than it could have gone"),
+    DRAGGED("moved while the phone lay still"),
 }
 
 /**
@@ -93,14 +118,22 @@ data class FusedFix(
  *   one to three satellites improve the estimate, and noise averages out.
  * - **Doppler.** Each signal's pseudorange rate measures velocity and the clock's drift.
  * - **Robustness.** Every measurement is checked against what the filter expects (5σ) and left
- *   out if it doesn't fit. A jump of the whole clock is recognised and absorbed instead. If most
- *   measurements stop fitting, the filter starts over from a snapshot fix.
+ *   out if it doesn't fit; within that, one well off the fit counts for less (Huber weights,
+ *   re-solved up to three times). A jump of the whole clock is recognised and absorbed instead.
+ *   If most measurements stop fitting, the filter starts over from a snapshot fix, but only one
+ *   within reach of where it was.
+ * - **Holding.** A fix the phone couldn't have reached since the last good update (nowhere
+ *   while it lies still, 50 m/s otherwise), or signals that move the position while the motion
+ *   sensors say the phone lies still, aren't followed: TPS keeps its position and says why,
+ *   until the signals agree with it again or the new place comes within reach.
+ * - **Static mode.** While the motion sensors say still, and the signals agree, the velocity is
+ *   held at zero: the position stops wandering, and the height settles.
  *
  * Pseudoranges are re-referenced to a fixed clock offset (the chip's at the start), so the
  * receiver clock simply drifts, by the same drift the Doppler sees, whether or not the chip
  * steers its clock. Plain Kotlin; one thread feeds it.
  */
-class SuperPosition {
+class SuperPosition(private val robust: Boolean = true) {
     private val x = DoubleArray(N)
     private val p = Array(N) { DoubleArray(N) }
     private var initialized = false
@@ -129,6 +162,26 @@ class SuperPosition {
     private var rangeNis: Double? = null
     private var rangeNisBySystem = emptyMap<Constellation, Double>()
     private var rateNis: Double? = null
+
+    private var motion = Motion.UNKNOWN
+    /** Where the phone came to rest (the sensors and the signals both said still), and how sure TPS was then. */
+    private var anchor: Ecef? = null
+    private var anchorSigma = 0.0
+    private val anchorP = Array(3) { DoubleArray(3) }
+    private var suspect: Suspect? = null
+    private var suspectSinceT = 0.0
+    private var suspectMoveM = 0.0
+    private var agreeRounds = 0
+    private var wantRestart = false
+    private var released = 0
+    private var lastReleaseAfterS: Double? = null
+    private var lastReleaseMoveM: Double? = null
+    private var stillApplied = false
+    private var lastDownweighted = 0
+    /** Re-centred at rest: the next update re-fits the clock before judging the signals. */
+    private var refitClock = false
+    /** Seconds the phone may have been moving since the last good update (all of them, without motion sensors). */
+    private var movingS = 0.0
 
     /** One satellite's track for the code-against-Doppler check. */
     private class Arc(val t0: Double, val start: Double, var lastT: Double, var lastRate: Double) {
@@ -161,11 +214,17 @@ class SuperPosition {
      */
     fun step(
         clock: RawClock, observations: List<Observation>, start: Ecef?, klobuchar: Klobuchar?, gpsSeconds: Double,
-        startAccuracyM: Double? = null,
+        startAccuracyM: Double? = null, motion: Motion = Motion.UNKNOWN,
     ): FusedFix? {
+        this.motion = motion
+        // Picked up: where it lay is no longer where it is.
+        if (motion != Motion.STILL) anchor = null
         val fullBias = clock.fullBiasNanos
         val t = clock.timeNanos * 1e-9
-        if (initialized && (t < lastT || t - lastT > MAX_GAP_S)) initialized = false
+        // A long gap without measurements: nothing vouches the phone stayed put, so the resting
+        // place goes; and the filter restarts, unless it's holding against suspect signals.
+        if (initialized && t - lastT > MAX_GAP_S) anchor = null
+        if (initialized && (t < lastT || (t - lastT > MAX_GAP_S && suspect == null))) initialized = false
         // Started cold from a snapshot, and the chip now has a decent fix: start again from that,
         // once, before anything was shown. Not a restart: no position of TPS's was ever on screen.
         if (initialized && !trusted && !startedFromChip && fullBias != null && start != null &&
@@ -195,6 +254,14 @@ class SuperPosition {
             // The chip's correction of its own clock since the reference, put back into the pseudoranges.
             val steer = ((fullBias - refFullBias) + (clock.biasNanos - refBias)) * 1e-9 * Pseudoranges.C
             update(t, observations, steer, klobuchar, gpsSeconds)
+        }
+        if (wantRestart) {
+            wantRestart = false
+            restartOrHold(t, observations, klobuchar, gpsSeconds)
+        }
+        if (initialized) {
+            zeroVelocity()
+            watchTheRestingPlace(t)
         }
         if (x.any { it.isNaN() || it.isInfinite() }) {
             initialized = false
@@ -317,6 +384,11 @@ class SuperPosition {
         lastRejected = 0
         smoothedSpeed = 0.0
         trusted = false
+        // Not the resting place: a restart doesn't move the phone. Only the motion sensors clear it.
+        suspect = null
+        agreeRounds = 0
+        wantRestart = false
+        movingS = 0.0
         acceptedBySystem = emptyMap()
         rejectedBySystem = emptyMap()
         return true
@@ -327,6 +399,7 @@ class SuperPosition {
     private fun predict(t: Double) {
         val dt = t - lastT
         lastT = t
+        if (motion != Motion.STILL) movingS += dt
         for (i in 0 until 3) x[i] += x[3 + i] * dt
         x[CLOCK] += x[DRIFT] * dt
         // P = F P Fᵀ: F moves position by velocity and the clock by its drift.
@@ -346,7 +419,7 @@ class SuperPosition {
         val geo = Geo.toGeodetic(Ecef(x[0], x[1], x[2]))
         val ground = Geo.enu(geo, Ecef(x[3], x[4], x[5]))
         smoothedSpeed += (sqrt(ground[0] * ground[0] + ground[1] * ground[1]) - smoothedSpeed) * minOf(1.0, dt / SPEED_SMOOTHING_S)
-        val accel = accelerationNoise(smoothedSpeed)
+        val accel = if (motion == Motion.STILL) ACCEL_STILL else accelerationNoise(smoothedSpeed)
         // People and cars turn and brake, but hardly ever accelerate up or down: far less
         // freedom vertically, or a noisy vertical speed carries the height away.
         val q = localCovariance(localAxes(geo), accel, accel * VERTICAL_SHARE)
@@ -416,15 +489,24 @@ class SuperPosition {
         }
         if (rows.isEmpty()) return
 
-        // A jump of the whole clock moves every pseudorange (or every rate) by the same amount:
-        // take it up in the clock rather than reject every satellite.
-        absorbCommonJump(rows.filter { it.range }, CLOCK)?.let { jump ->
-            clockJumps++
-            lastClockJumpM = jump
-            // Every pseudorange jumped: the tracks start again.
-            endArcs()
+        if (suspect != null || refitClock) {
+            // Holding, or just put back where the phone came to rest: the position stays, and the
+            // clock and its drift follow the signals (their median), so whether they fit is
+            // judged against the held position alone.
+            refitClock = false
+            followMedian(rows.filter { it.range }, CLOCK)
+            followMedian(rows.filter { !it.range }, DRIFT)
+        } else {
+            // A jump of the whole clock moves every pseudorange (or every rate) by the same amount:
+            // take it up in the clock rather than reject every satellite.
+            absorbCommonJump(rows.filter { it.range }, CLOCK)?.let { jump ->
+                clockJumps++
+                lastClockJumpM = jump
+                // Every pseudorange jumped: the tracks start again.
+                endArcs()
+            }
+            absorbCommonJump(rows.filter { !it.range }, DRIFT)
         }
-        absorbCommonJump(rows.filter { !it.range }, DRIFT)
 
         // Gate: a measurement far from what the filter expects is left out, not averaged in.
         val accepted = rows.filter { row ->
@@ -442,24 +524,61 @@ class SuperPosition {
         trackCodeDoppler(t, accepted, measuredBy)
         acceptedBySystem = rows.filter { it.range && it in acceptedSet }.groupingBy { it.satellite.constellation }.eachCount()
         rejectedBySystem = rows.filter { it.range && it !in acceptedSet }.groupingBy { it.satellite.constellation }.eachCount()
+        if (suspect != null) {
+            // Holding: the signals don't move the position until they agree with it again, or
+            // come within reach. Agree: for three rounds, three in four pseudoranges within the
+            // gate, and their typical surprise (median NIS) what honest signals give (~0.45),
+            // not what a drag of a few σ leaves behind.
+            val surprise = accepted.filter { it.range }.map(::nis).sorted().let { if (it.isEmpty()) Double.MAX_VALUE else it[it.size / 2] }
+            val agree = ranges >= 4 && (ranges - rangesRejected) * 4 >= ranges * 3 && surprise <= AGREE_MEDIAN_NIS
+            agreeRounds = if (agree) agreeRounds + 1 else 0
+            if (agreeRounds < AGREE_ROUNDS) {
+                wantRestart = true
+                return
+            }
+            suspect = null
+            badRounds = 0
+        }
         badRounds = if (ranges >= 4 && rangesRejected * 2 > ranges) badRounds + 1 else 0
         if (badRounds >= MAX_BAD_ROUNDS) {
-            // Most satellites disagree with the filter for several rounds: start over.
-            initialized = false
+            // Most satellites disagree with the filter for several rounds: start over, if within reach.
+            wantRestart = true
             return
         }
         if (accepted.isEmpty()) return
 
-        // Sequential scalar updates, all linearised at the predicted state.
+        // Sequential scalar updates, all linearised at the predicted state. Then, while any
+        // measurement sits more than HUBER_K σ off the result, solved again from the same
+        // prediction with that one counting for less, by k/|e| (Huber's M-estimator: convex,
+        // so it can't run away), up to ROBUST_PASSES in all.
         val x0 = x.copyOf()
-        for (row in accepted) {
-            var v = row.innovation
-            for (i in 0 until N) v -= row.h[i] * (x[i] - x0[i])
-            val ph = DoubleArray(N) { i -> (0 until N).sumOf { j -> p[i][j] * row.h[j] } }
-            val s = (0 until N).sumOf { i -> row.h[i] * ph[i] } + row.variance
-            for (i in 0 until N) x[i] += ph[i] / s * v
-            for (i in 0 until N) for (j in 0 until N) p[i][j] -= ph[i] * ph[j] / s
+        val p0 = Array(N) { p[it].copyOf() }
+        val weights = DoubleArray(accepted.size) { 1.0 }
+        for (pass in 0 until (if (robust) ROBUST_PASSES else 1)) {
+            if (pass > 0) {
+                var changed = false
+                for ((k, row) in accepted.withIndex()) {
+                    var v = row.innovation
+                    for (i in 0 until N) v -= row.h[i] * (x[i] - x0[i])
+                    val e = abs(v) / sqrt(row.variance)
+                    val w = if (e <= HUBER_K) 1.0 else HUBER_K / e
+                    if (abs(w - weights[k]) > 0.02) changed = true
+                    weights[k] = w
+                }
+                if (!changed) break
+                x0.copyInto(x)
+                for (i in 0 until N) p0[i].copyInto(p[i])
+            }
+            for ((k, row) in accepted.withIndex()) {
+                var v = row.innovation
+                for (i in 0 until N) v -= row.h[i] * (x[i] - x0[i])
+                val ph = DoubleArray(N) { i -> (0 until N).sumOf { j -> p[i][j] * row.h[j] } }
+                val s = (0 until N).sumOf { i -> row.h[i] * ph[i] } + row.variance / weights[k]
+                for (i in 0 until N) x[i] += ph[i] / s * v
+                for (i in 0 until N) for (j in 0 until N) p[i][j] -= ph[i] * ph[j] / s
+            }
         }
+        lastDownweighted = weights.count { it < 0.99 }
         // Keep P symmetric against rounding.
         for (i in 0 until N) for (j in i + 1 until N) {
             val m = (p[i][j] + p[j][i]) / 2
@@ -469,6 +588,7 @@ class SuperPosition {
         lastSatellites = usedRanges.size
         lastSystems = usedRanges.map { it.constellation }.toSet()
         lastUpdateT = t
+        movingS = 0.0
         updates++
     }
 
@@ -523,6 +643,14 @@ class SuperPosition {
             s[1] += arc.cxx
         }
         return sums.filterValues { it[1] > 0 }.mapValues { (_, s) -> s[0] / s[1] }
+    }
+
+    /** Moves state [index] (the clock or its drift) by the median of [rows]' innovations, and takes it out of them. */
+    private fun followMedian(rows: List<Row>, index: Int) {
+        if (rows.isEmpty()) return
+        val median = rows.map { it.innovation }.sorted()[rows.size / 2]
+        x[index] += median
+        for (row in rows) row.innovation -= median
     }
 
     /** If [rows] all share one large offset, moves state [index] by it (the clock or its drift jumped) and returns it. */
@@ -591,6 +719,171 @@ class SuperPosition {
         return base * weak * system * multipath * RANGE_SIGMA_SCALE
     }
 
+    // ------------------------------------------------------------------ holding
+
+    /**
+     * Most measurements stopped fitting (or, while holding, still don't). Before TPS's position
+     * was ever shown, start over as before. At rest, go back to where the phone came to rest,
+     * and hold there if the signals' own fix lies beyond what their noise explains. Otherwise
+     * start over only at a place within reach of where TPS was; else hold, and check each round.
+     */
+    private fun restartOrHold(t: Double, obs: List<Observation>, klobuchar: Klobuchar?, gpsSeconds: Double) {
+        val here = Ecef(x[0], x[1], x[2])
+        val rest = anchor
+        if (rest == null && !trusted && suspect == null) {
+            initialized = false
+            return
+        }
+        val there = snapshot(obs, rest ?: here, klobuchar, gpsSeconds)
+        if (rest != null) {
+            val fromRest = distance(rest, there?.ecef ?: here)
+            // While holding, the position is already at rest.
+            if (suspect == null) recenterAtRest()
+            if (fromRest > restMargin(there)) {
+                if (suspect == null) hold(Suspect.DRAGGED, fromRest, t) else suspectMoveM = fromRest
+            } else {
+                // The signals put the phone back where it lies: the hold just ends.
+                suspect = null
+            }
+            return
+        }
+        if (there == null) {
+            // Too few satellites to say where the signals put TPS: keep holding, or start over as before.
+            if (suspect == null) initialized = false
+            return
+        }
+        val move = distance(here, there.ecef)
+        if (move <= reach()) {
+            release(t, move)
+            // The next round starts over there.
+            initialized = false
+            return
+        }
+        if (suspect == null) hold(Suspect.OUT_OF_REACH, move, t) else suspectMoveM = move
+    }
+
+    /**
+     * How far the phone could have gone from TPS's position: its uncertainty, a margin for a
+     * weak snapshot, and 50 m/s for every second it may have been moving since the last good
+     * update (none while the motion sensors say still).
+     */
+    private fun reach(): Double = REACH_FLOOR_M + 3 * horizontalSigma() + REACH_SPEED_MPS * movingS
+
+    /**
+     * At rest, how far the signals may put the phone from where it came to rest before that
+     * counts as being dragged: 25 m, or three times TPS's uncertainty then, or three times the
+     * snapshot's own (indoors a one-second fix can be 50–80 m off by itself).
+     */
+    private fun restMargin(snapshot: Solution?): Double {
+        val snap = snapshot?.let { (it.hdop ?: 3.0) * max(it.residualRms, SNAPSHOT_RANGE_FLOOR_M) } ?: 0.0
+        return maxOf(DRAG_FLOOR_M, 3 * anchorSigma, 3 * snap)
+    }
+
+    private fun hold(reason: Suspect, move: Double, t: Double) {
+        suspectSinceT = t
+        suspect = reason
+        suspectMoveM = move
+        agreeRounds = 0
+        badRounds = 0
+    }
+
+    /** A hold ends with TPS taking the signals' place, now within reach of where it was. */
+    private fun release(t: Double, move: Double) {
+        if (suspect == null) return
+        released++
+        lastReleaseAfterS = t - suspectSinceT
+        lastReleaseMoveM = move
+        suspect = null
+    }
+
+    /**
+     * Back to where the phone came to rest, as sure as TPS was then. The clock is re-fitted to
+     * the signals at the next update (it took up part of whatever pulled the position away).
+     */
+    private fun recenterAtRest() {
+        val a = anchor ?: return
+        x[0] = a.x; x[1] = a.y; x[2] = a.z
+        for (i in 3 until 6) x[i] = 0.0
+        for (i in 0 until N) for (j in 0 until 3) {
+            p[i][j] = 0.0
+            p[j][i] = 0.0
+        }
+        for (i in 0 until 3) for (j in 0 until 3) p[i][j] = anchorP[i][j]
+        // Velocity: at rest.
+        for (i in 3 until 6) p[i][i] = max(p[i][i], ZUPT_SIGMA * ZUPT_SIGMA)
+        refitClock = true
+        badRounds = 0
+    }
+
+    private fun distance(a: Ecef, b: Ecef): Double = Solver.offset(Geo.toGeodetic(a), b).let { hypot(it[0], it[1]) }
+
+    /** Where the signals alone put the receiver this round, as a fresh start would solve it; null with too few. */
+    private fun snapshot(obs: List<Observation>, guess: Ecef, klobuchar: Klobuchar?, gpsSeconds: Double): Solution? {
+        val corrected = obs.filter { it.constellation in SYSTEMS }.map { it.copy(pseudorange = it.pseudorange - (it.isbMeters ?: 0.0)) }
+        if (corrected.size < 4) return null
+        val bySystem = corrected.groupBy { it.constellation }
+        val single = if (corrected.all { it.isbMeters != null }) Solver.solve(corrected.map { it.copy(constellation = reference) }, guess, klobuchar, gpsSeconds) else null
+        return single
+            ?: Solver.solve(corrected, guess, klobuchar, gpsSeconds)
+            ?: Solver.solve(corrected.filter { (bySystem[it.constellation]?.size ?: 0) >= 2 }, guess, klobuchar, gpsSeconds)
+    }
+
+    /**
+     * Static mode: while the motion sensors say still, and the signals agree (barely moving) or
+     * the phone came to rest with both agreeing, the velocity is held at zero. Not otherwise: on
+     * a smooth ride the sensors can feel still while the signals say 30 m/s.
+     */
+    private fun zeroVelocity() {
+        stillApplied = false
+        if (motion != Motion.STILL) return
+        if (anchor == null && horizontalSpeed() >= STILL_SIGNALS_MPS) return
+        for (axis in 3 until 6) {
+            val ph = DoubleArray(N) { i -> p[i][axis] }
+            val s = p[axis][axis] + ZUPT_SIGMA * ZUPT_SIGMA
+            val v = -x[axis]
+            for (i in 0 until N) x[i] += ph[i] / s * v
+            for (i in 0 until N) for (j in 0 until N) p[i][j] -= ph[i] * ph[j] / s
+        }
+        stillApplied = true
+    }
+
+    /**
+     * Notes where the phone came to rest (sensors still, signals barely moving, TPS's position
+     * shown). While it stays at rest, the filter mustn't wander from there by more than
+     * [DRAG_FLOOR_M], or three times its uncertainty then: if it does, it goes back and holds.
+     */
+    private fun watchTheRestingPlace(t: Double) {
+        if (motion != Motion.STILL) return
+        val here = Ecef(x[0], x[1], x[2])
+        val a = anchor
+        if (a == null) {
+            if (trusted && suspect == null && horizontalSpeed() < STILL_SIGNALS_MPS) {
+                anchor = here
+                anchorSigma = horizontalSigma()
+                for (i in 0 until 3) for (j in 0 until 3) anchorP[i][j] = p[i][j]
+            }
+            return
+        }
+        if (suspect != null) return
+        val moved = distance(a, here)
+        if (moved > max(DRAG_FLOOR_M, 3 * anchorSigma)) {
+            recenterAtRest()
+            hold(Suspect.DRAGGED, moved, t)
+        }
+    }
+
+    private fun horizontalSigma(): Double {
+        val axes = localAxes(Geo.toGeodetic(Ecef(x[0], x[1], x[2])))
+        var s = 0.0
+        for (k in 0 until 2) for (i in 0 until 3) for (j in 0 until 3) s += axes[k][i] * p[i][j] * axes[k][j]
+        return sqrt(max(s, 0.0))
+    }
+
+    private fun horizontalSpeed(): Double {
+        val v = Geo.enu(Geo.toGeodetic(Ecef(x[0], x[1], x[2])), Ecef(x[3], x[4], x[5]))
+        return hypot(v[0], v[1])
+    }
+
     // ------------------------------------------------------------------ out
 
     private fun output(): FusedFix? {
@@ -610,10 +903,12 @@ class SuperPosition {
         }
         val horizontal = sqrt(variance(east) + variance(north))
         val since = lastT - lastUpdateT
-        trusted = if (!trusted) {
-            updates >= FusedFix.SETTLE_UPDATES && horizontal <= FusedFix.SETTLE_ACCURACY_M && since <= 2.5
-        } else {
-            since <= FusedFix.HOLD_S && horizontal <= FusedFix.HOLD_ACCURACY_M
+        trusted = when {
+            // Holding against suspect signals: for as long as the held position stays useful.
+            suspect != null -> horizontal <= FusedFix.SUSPECT_HOLD_ACCURACY_M
+            !trusted -> updates >= FusedFix.SETTLE_UPDATES && horizontal <= FusedFix.SETTLE_ACCURACY_M && since <= 2.5
+            // Lying still, the position holds through a loss for as long as it stays good.
+            else -> (since <= FusedFix.HOLD_S || anchor != null) && horizontal <= FusedFix.HOLD_ACCURACY_M
         }
         return FusedFix(
             position = geo,
@@ -644,6 +939,14 @@ class SuperPosition {
             rangeNisBySystem = rangeNisBySystem,
             rateNis = rateNis,
             codeMinusDopplerMps = codeMinusDoppler(),
+            still = stillApplied,
+            suspect = suspect,
+            suspectMoveM = suspectMoveM,
+            suspectForS = if (suspect != null) lastT - suspectSinceT else 0.0,
+            released = released,
+            lastReleaseAfterS = lastReleaseAfterS,
+            lastReleaseMoveM = lastReleaseMoveM,
+            downweighted = lastDownweighted,
         )
     }
 
@@ -696,6 +999,23 @@ class SuperPosition {
         private const val WEAK_CN0 = 30.0
         /** 5σ, squared. */
         private const val GATE = 25.0
+        /** Huber's threshold, σ, and how many times an update may be solved. */
+        private const val HUBER_K = 1.5
+        private const val ROBUST_PASSES = 3
+        /** A restart must land within this, plus 3σ, plus 50 m/s for each second the phone may have moved. */
+        private const val REACH_FLOOR_M = 100.0
+        private const val REACH_SPEED_MPS = 50.0
+        /** Rounds of agreement that end a hold, and the most typical surprise (median NIS) that counts as agreeing. */
+        private const val AGREE_ROUNDS = 3
+        private const val AGREE_MEDIAN_NIS = 2.0
+        /** Signals this slow count as still (static mode, coming to rest). */
+        private const val STILL_SIGNALS_MPS = 0.5
+        /** The zero-velocity update's noise, m/s. */
+        private const val ZUPT_SIGMA = 0.05
+        /** At rest, signals moving TPS more than this (or 3σ at rest) are dragging it. */
+        private const val DRAG_FLOOR_M = 25.0
+        /** A snapshot's pseudorange noise is at least this, metres (with four satellites its residuals are zero). */
+        private const val SNAPSHOT_RANGE_FLOOR_M = 5.0
         private const val JUMP_SIGMAS = 5.0
         private const val MAX_BAD_ROUNDS = 3
     }

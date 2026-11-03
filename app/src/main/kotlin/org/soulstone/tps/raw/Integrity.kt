@@ -22,6 +22,7 @@ enum class Threat(val label: String) {
 enum class Check(val title: String) {
     SYSTEMS("systems agree"),
     JUMPS("position jumps"),
+    MOTION("motion agrees"),
     STARTUP("since last time"),
     TIME("GNSS time"),
     SOURCE("position source"),
@@ -70,6 +71,8 @@ data class IntegrityInput(
     val wallMs: Long? = null,
     /** Android's boot count: the monotonic clock only counts honestly within one boot. */
     val bootCount: Int? = null,
+    /** What the phone's motion sensors say. */
+    val motion: Motion = Motion.UNKNOWN,
 )
 
 /** Where and when TPS last had a position it trusted, kept on the phone between sessions. */
@@ -81,7 +84,10 @@ data class Remembered(val position: Geodetic, val gnssTimeMs: Long, val elapsedM
  *
  * - **Systems agree**: one system's pseudoranges keep failing the super position's checks while
  *   the others' pass. A fake that covers only GPS is the classic cheap attack.
- * - **Position jumps**: the position moves faster than anything on the ground.
+ * - **Position jumps**: the position moves faster than anything on the ground, or the signals
+ *   put TPS somewhere it couldn't have reached (then TPS holds instead of following).
+ * - **Motion agrees**: the signals move TPS while the motion sensors say the phone lies still
+ *   (a drag-off spoof; TPS holds where the phone came to rest).
  * - **Since last time**: at start-up, the position and GNSS time against where and when TPS
  *   last trusted its fix, so an attack already running when TPS opens can still show.
  * - **GNSS time**: GNSS time jumps against the phone's monotonic clock, or sits far from
@@ -134,6 +140,7 @@ class IntegrityMonitor {
     private var fitRounds = 0
     private var chipRounds = 0
     private var seenRestarts = 0
+    private var seenReleases = 0
     private var seenClockJumps = 0
     private var timeBase: Long? = null
     private val timeFirst = ArrayList<Long>()
@@ -145,7 +152,7 @@ class IntegrityMonitor {
         dropRounds = 0; riseRounds = 0; uniformRounds = 0; strongRounds = 0
         agcBase.clear(); agcSeen.clear(); gainRounds = 0; agcEver = false; gainHistory.clear(); blockedUntil = Double.NaN
         remembered = null; startupChecked = false
-        systemRounds.clear(); fitRounds = 0; chipRounds = 0; seenRestarts = 0; seenClockJumps = 0
+        systemRounds.clear(); fitRounds = 0; chipRounds = 0; seenRestarts = 0; seenReleases = 0; seenClockJumps = 0
         timeBase = null; timeFirst.clear(); lastChip = null
     }
 
@@ -164,6 +171,7 @@ class IntegrityMonitor {
         signals(input, now, dt)
         systems(input, now)
         jumps(input, now)
+        motion(input, now)
         startup(input, now)
         time(input, now)
         source(input, now)
@@ -180,10 +188,11 @@ class IntegrityMonitor {
         return IntegrityReport(worst?.severity ?: Severity.OK, worst, checks)
     }
 
-    private fun raise(check: Check, severity: Severity, threat: Threat, text: String, now: Double, holdS: Double? = null) {
+    private fun raise(check: Check, severity: Severity, threat: Threat, text: String, now: Double, holdS: Double? = null, replace: Boolean = false) {
         val current = latched[check]
-        // A stronger finding replaces a weaker one; a weaker one doesn't cut a stronger one short.
-        if (current != null && current.result.severity > severity && current.until > now) return
+        // A stronger finding replaces a weaker one; a weaker one doesn't cut a stronger one short
+        // (unless it's news about the same thing: a hold that ended).
+        if (!replace && current != null && current.result.severity > severity && current.until > now) return
         latched[check] = Latch(CheckResult(check, severity, threat, text), now + (holdS ?: if (severity == Severity.ALERT) ALERT_HOLD_S else CAUTION_HOLD_S))
     }
 
@@ -396,6 +405,22 @@ class IntegrityMonitor {
                 raise(Check.JUMPS, Severity.ALERT, Threat.SPOOFING, "TPS's position jumped ${distance(move)} in %.0f s, faster than anything on the ground: the satellites now place you elsewhere.".format(max(gap, 1.0)), now)
             }
         }
+        // Holding: the signals put TPS somewhere it couldn't have reached.
+        if (f != null && f.suspect == Suspect.OUT_OF_REACH) {
+            raise(
+                Check.JUMPS, if (f.suspectMoveM > JUMP_FLOOR_M) Severity.ALERT else Severity.CAUTION, Threat.SPOOFING,
+                "The signals put TPS ${distance(f.suspectMoveM)} away, farther than it could have gone: it holds its last position instead of following (${duration(f.suspectForS)} so far).", now,
+            )
+        }
+        // A hold that ended with TPS taking the signals' position: within reach by then, but it may be false.
+        if (f != null && f.released > seenReleases) {
+            seenReleases = f.released
+            raise(
+                Check.JUMPS, Severity.CAUTION, Threat.SPOOFING,
+                "TPS held for ${duration(f.lastReleaseAfterS ?: 0.0)}, then took the signals' position ${distance(f.lastReleaseMoveM ?: 0.0)} away, as far as it could have gone by then: it may be false.", now, RELEASE_HOLD_S,
+                replace = true,
+            )
+        }
         val chip = input.chip
         if (chip != null) {
             lastChip?.let { (t, before) ->
@@ -408,6 +433,30 @@ class IntegrityMonitor {
             lastChip = now to chip
         }
         okText[Check.JUMPS] = "none"
+    }
+
+    private fun motion(input: IntegrityInput, now: Double) {
+        val f = input.fused
+        if (f?.suspect == Suspect.DRAGGED) {
+            // Far beyond what reflections do: an alert. Within it, a caution (indoors, a still
+            // phone's signals can wander tens of metres).
+            if (f.suspectMoveM > JUMP_FLOOR_M) {
+                raise(
+                    Check.MOTION, Severity.ALERT, Threat.SPOOFING,
+                    "The signals moved TPS ${distance(f.suspectMoveM)} while the phone lay still: false signals dragging the position, or the phone is on something moving very smoothly. TPS holds where the phone came to rest.", now,
+                )
+            } else {
+                raise(
+                    Check.MOTION, Severity.CAUTION, Threat.SPOOFING,
+                    "The signals moved TPS ${distance(f.suspectMoveM)} while the phone lay still: false signals, or reflections. TPS holds where the phone came to rest.", now,
+                )
+            }
+        }
+        okText[Check.MOTION] = when (input.motion) {
+            Motion.UNKNOWN -> "motion sensors not reporting"
+            Motion.STILL -> if (f?.still == true) "phone at rest; TPS's position held still" else "phone at rest"
+            Motion.MOVING -> "phone moving"
+        }
     }
 
     private fun time(input: IntegrityInput, now: Double) {
@@ -616,6 +665,8 @@ class IntegrityMonitor {
         /** Faster than this between sessions is faster than an airliner (with a jet stream behind it). */
         const val AIRLINER_MPS = 400.0
         const val STARTUP_HOLD_S = 120.0
+        /** How long the caution after a hold that ended by following the signals stays up. */
+        const val RELEASE_HOLD_S = 300.0
         const val WALL_TIME_MS = 60_000L
         const val FIT_SHARE = 0.3
         const val FIT_ROUNDS = 5
