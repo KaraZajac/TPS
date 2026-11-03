@@ -34,6 +34,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
 import org.soulstone.tps.raw.Agc
+import org.soulstone.tps.raw.AgcBands
 import org.soulstone.tps.raw.ChipInfo
 import org.soulstone.tps.raw.ChipPvt
 import org.soulstone.tps.raw.ChipPvtReader
@@ -53,6 +54,8 @@ import org.soulstone.tps.raw.RawRecorder
 import org.soulstone.tps.raw.RawState
 import org.soulstone.tps.raw.RawStatus
 import org.soulstone.tps.raw.RecorderState
+import org.soulstone.tps.raw.Remembered
+import org.soulstone.tps.raw.Severity
 
 /**
  * Listens to the phone's GNSS chip, or to [DemoSky], and publishes one [State].
@@ -130,6 +133,15 @@ class GnssEngine private constructor(context: Context) {
 
     /** Jamming and spoofing checks. GNSS thread only; starts afresh with each session. */
     private val integrity = IntegrityMonitor()
+
+    /** Where and when TPS last trusted its own position, for the next start-up's check. */
+    private val lastTrusted = LastTrusted(app)
+    private var rememberedAtMs: Long? = null
+
+    /** Android's boot count: the monotonic clock only counts honestly within one boot. */
+    private val bootCount: Int? = runCatching {
+        android.provider.Settings.Global.getInt(app.contentResolver, android.provider.Settings.Global.BOOT_COUNT)
+    }.getOrNull()
     private val _recorder = MutableStateFlow(RecorderState())
     val recorderState: StateFlow<RecorderState> = _recorder.asStateFlow()
 
@@ -311,7 +323,10 @@ class GnssEngine private constructor(context: Context) {
             return
         }
         real = r
-        handler.post { integrity.reset() }
+        handler.post {
+            integrity.reset()
+            integrity.startSession(lastTrusted.load())
+        }
         val on = LocationManagerCompat.isLocationEnabled(m) && m.isProviderEnabled(LocationManager.GPS_PROVIDER)
         update(id) { it.copy(status = if (on) Status.RUNNING else Status.LOCATION_OFF) }
         // Raw data is optional: a phone without it still gets everything else.
@@ -400,14 +415,17 @@ class GnssEngine private constructor(context: Context) {
                 recorder.raw(event, epoch)
                 val s = _state.value
                 // Own fixes are compared with, and checked against, the chip's fix: never TPS's own.
-                val chip = s.chipFix?.takeIf { s.chipFixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
+                // A mock location (another app's) is neither a start nor a reference.
+                val chipFix = s.chipFix?.takeIf { s.chipFixValid && !it.mock }
+                val chip = chipFix?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
                 // Defensive: one odd measurement mustn't take down the GNSS thread.
-                val report = runCatching { ownFix.solve(epoch, chip, s.sky, s.chipFix?.takeIf { s.chipFixValid }?.accuracyM?.toDouble()) }.getOrNull()
+                val report = runCatching { ownFix.solve(epoch, chip, s.sky, chipFix?.accuracyM?.toDouble()) }.getOrNull()
                 val withPvt = epoch.measurements.mapNotNull { it.pvt }
                 // The super position, as the fix TPS shows; dropped as soon as it isn't usable.
                 val tps = if (report == null) s.tpsFix else report.fused?.takeIf { it.usable }?.let { fusedToFix(it, epoch.clock, s.chipFix) }
                 if (report != null) tps?.let { recorder.tpsFix(it) }
                 val checks = runCatching { integrity.update(integrityInput(epoch, report?.fused, s, chip)) }.getOrNull()
+                report?.fused?.let { f -> if (checks?.level == Severity.OK) remember(f, chipFix) }
                 update(id) {
                     it.copy(
                         tpsFix = tps,
@@ -418,6 +436,7 @@ class GnssEngine private constructor(context: Context) {
                             signals = epoch.measurements.size,
                             fullTracking = epoch.fullTracking,
                             agc = epoch.agc,
+                            agcFromSignals = epoch.agcFromSignals,
                             report = report ?: it.raw.report,
                             pvtSignals = withPvt.size,
                             pvtUnreadable = epoch.pvtUnreadable,
@@ -539,13 +558,31 @@ class GnssEngine private constructor(context: Context) {
                 pvt = pvt,
             )
         }
-        val agc = if (Build.VERSION.SDK_INT >= 33) {
+        val listed = if (Build.VERSION.SDK_INT >= 33) {
             e.gnssAutomaticGainControls.map { Agc(Constellation.fromAndroid(it.constellationType), it.carrierFrequencyHz, it.levelDb) }
         } else {
             emptyList()
         }
+        // Android names the deprecated per-measurement gain as the fallback when the list is empty.
+        val perSignal = if (listed.isEmpty()) {
+            AgcBands.fromSignals(
+                e.measurements.mapNotNull { m ->
+                    @Suppress("DEPRECATION")
+                    if (m.hasAutomaticGainControlLevelDb()) {
+                        Triple(Constellation.fromAndroid(m.constellationType), if (m.hasCarrierFrequencyHz()) m.carrierFrequencyHz.toDouble() else null, m.automaticGainControlLevelDb)
+                    } else {
+                        null
+                    }
+                }
+            )
+        } else {
+            emptyList()
+        }
         val full = if (Build.VERSION.SDK_INT >= 34 && e.hasIsFullTracking()) e.isFullTracking else null
-        return RawEpoch(clock, measurements, agc, full, pvtUnreadable = unreadable, pvtWhy = why)
+        return RawEpoch(
+            clock, measurements, listed.ifEmpty { perSignal }, agcFromSignals = perSignal.isNotEmpty(),
+            fullTracking = full, pvtUnreadable = unreadable, pvtWhy = why,
+        )
     }
 
     /** Runs on the GNSS thread, where AltitudeConverter's blocking first load is fine. */
@@ -589,12 +626,34 @@ class GnssEngine private constructor(context: Context) {
         return clock.fullBiasNanos?.let { (clock.timeNanos - it - Math.round(clock.biasNanos)) / 1_000_000 + GPS_EPOCH_UNIX_MS - leap * 1_000L }
     }
 
+    /**
+     * Keeps TPS's position, when all checks pass, for the next start-up to compare with: every
+     * 15 s, with the chip's GNSS time (the time the checks use) and the phone's clocks. GNSS thread.
+     */
+    private fun remember(f: FusedFix, chipFix: Fix?) {
+        if (!f.usable || f.holding) return
+        val fix = chipFix?.takeIf { it.gnssTimeMs > 0 } ?: return
+        val now = SystemClock.elapsedRealtime()
+        if (rememberedAtMs?.let { now - it < REMEMBER_EVERY_MS } == true) return
+        rememberedAtMs = now
+        lastTrusted.save(
+            Remembered(
+                position = f.position,
+                gnssTimeMs = fix.gnssTimeMs,
+                elapsedMs = fix.elapsedRealtimeMs,
+                wallMs = System.currentTimeMillis() - (now - fix.elapsedRealtimeMs),
+                bootCount = bootCount,
+            )
+        )
+    }
+
     /** Everything the integrity checks look at this round. */
     private fun integrityInput(epoch: RawEpoch, fused: FusedFix?, s: State, chip: Geodetic?): IntegrityInput {
         val elapsedNs = epoch.clock.elapsedRealtimeNanos ?: SystemClock.elapsedRealtimeNanos()
         // Time comes from the chip's fix (any phone has one; it's the time TPS shows), not the
-        // raw clock: the emulator's raw clock, for one, runs years off.
-        val fix = s.chipFix?.takeIf { s.chipFixValid }
+        // raw clock: the emulator's raw clock, for one, runs years off. Not from a mock fix,
+        // whose time is whatever the other app says.
+        val fix = s.chipFix?.takeIf { s.chipFixValid && !it.mock }
         val gnssMs = fix?.gnssTimeMs?.takeIf { it > 0 }
         val ageMs = fix?.let { SystemClock.elapsedRealtime() - it.elapsedRealtimeMs } ?: 0L
         // Android's network (NTP) time, when it has one (Android 13+): no network use of TPS's own.
@@ -615,6 +674,11 @@ class GnssEngine private constructor(context: Context) {
             gnssMinusElapsedMs = gnssMs?.let { it - fix.elapsedRealtimeMs },
             gnssMinusNetworkMs = network,
             gnssMinusWallMs = gnssMs?.let { it - (System.currentTimeMillis() - ageMs) },
+            chipMock = s.chipFix?.mock == true,
+            gnssTimeMs = gnssMs,
+            elapsedMs = fix?.elapsedRealtimeMs,
+            wallMs = fix?.let { System.currentTimeMillis() - ageMs },
+            bootCount = bootCount,
         )
     }
 
@@ -692,6 +756,8 @@ class GnssEngine private constructor(context: Context) {
 
         /** 1980-01-06, the GPS epoch, in Unix milliseconds. */
         private const val GPS_EPOCH_UNIX_MS = 315_964_800_000L
+
+        private const val REMEMBER_EVERY_MS = 15_000L
 
         @Volatile private var INSTANCE: GnssEngine? = null
 

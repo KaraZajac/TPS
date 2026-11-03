@@ -55,13 +55,16 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   red for an alert, when TPS sees signs of **jamming or spoofing**, with a line saying what
   and the full list in the INTEGRITY card. It checks whether one system disagrees with the
   others (a fake GPS signal is the classic attack; TPS keeps to the honest systems), whether
-  the position jumps faster than anything on the ground, whether GNSS time jumps against
-  the phone's steady clock or sits far from Android's network time, whether every signal
-  drops at once (jamming, or a blocked sky: without the chip's AGC a phone can't tell them
-  apart) or gets stronger at once, whether all signals arrive at the same strength, whether
-  the receiver gain falls (where the chip reports it), whether the clock jumps, whether the
-  measurements fit together, and whether TPS and the chip agree. A phone can't prove an
-  attack, and a careful spoofer that fakes every system consistently can pass every check.
+  the position jumps faster than anything on the ground, whether TPS starts somewhere it
+  couldn't have reached since it last trusted its fix (or at a GNSS time the phone's own
+  clock disagrees with), whether GNSS time jumps against the phone's steady clock or sits
+  far from Android's network time, whether another app is supplying the chip's position (a
+  mock location), whether every signal drops at once (jamming, or a blocked sky: only a
+  chip that reports its receiver gain can tell them apart) or gets stronger at once,
+  whether all signals arrive at the same strength, whether the receiver gain moves (where
+  the chip reports it), whether the clock jumps, whether the measurements fit together, and
+  whether TPS and the chip agree. A phone can't prove an attack, and a careful spoofer that
+  fakes every system consistently can pass every check.
 - **Fix line**: 2D or 3D, satellites used out of those in view, time to first fix, HDOP,
   and whether the fix uses two frequencies.
 - **Satellite time**: the time from GNSS, in your time zone and in UTC, and how far off
@@ -140,7 +143,8 @@ there.
 
 TPS requests location and nothing else. CI checks every APK against that allowlist
 ([`scripts/check-permissions.sh`](scripts/check-permissions.sh)) and fails the build if a
-dependency adds a network permission. Waypoints and settings stay on the phone.
+dependency adds a network permission. Waypoints, settings and the last position TPS
+trusted (for its start-up check) stay on the phone.
 
 ## License
 

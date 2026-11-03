@@ -442,7 +442,8 @@ doesn't share the chip's filtering or assistance data.
      app with precise location, and the measurement's public `writeToParcel` writes it. So
      TPS serializes each measurement and parses it out (`ChipPvtParser`): it finds the
      class name, then reads the flags, three nested objects, two delays and five Android 13
-     fields (AOSP 14 and 16 are identical). It uses only public APIs: no reflection, no
+     fields (AOSP 14, 16 and 17 are identical; checked against the android17-release and main
+     sources, where `getSatellitePvt` is still a system API). It uses only public APIs: no reflection, no
      hidden-API exemptions. An instrumented test (`ChipPvtDeviceTest`) has Android's own
      `GnssMeasurement.CREATOR` read the layout back on Android 14 and 16 emulators. This is
      how phones without navigation messages, like most Qualcomm ones, get own fixes, GLONASS
@@ -498,36 +499,76 @@ part: 3–26 m from the chip's. In Kara's basement (18 dB-Hz, the chip passing o
 satellites a round, its own fix ±33–139 m) TPS rightly stays off: the few snapshots there
 were ~400 m out, and nothing was raised.
 
-**Integrity (0.3.0-dev.5).** `IntegrityMonitor`, each check worded with what else it could
-be, findings held 20 s (caution) or 30 s (alert) after their cause:
+**Integrity (0.3.0-dev.5, extended in dev.7).** `IntegrityMonitor`, each check worded with
+what else it could be, findings held 20 s (caution) or 30 s (alert) after their cause:
 - *systems agree* (alert): one system's pseudoranges mostly rejected by the super position
   for 3 rounds while others give at least 4: a fake signal for one system;
 - *position jumps* (alert): a restart moving TPS's shown position more than 200 m + 50 m/s ×
   the gap, or the chip's fix jumping more than 500 m + 50 m/s × the gap;
+- *since last time* (alert, held 2 min, dev.7): TPS remembers where and when it last
+  trusted its fix (every 15 s while every check passes; one record in SharedPreferences,
+  backups off). At the next session's first position (1 km or better): within the same
+  boot, GNSS time must match what the phone's monotonic clock counted, to 1 s + 100 ppm
+  of the gap (a sleeping phone's crystal); after a reboot, GNSS time mustn't run
+  backwards; and the position mustn't have moved more than 2 km beyond its accuracy
+  faster than 400 m/s (an airliner with a jet stream). This catches an attack that was
+  already running when TPS opened, which the in-session checks can't;
 - *GNSS time* (alert): the chip's fix time against the phone's monotonic clock moving more
   than 0.5 s (it holds to ~15 ms on Kara's phone), or more than 5 s off Android's network
-  time (API 33); caution beyond 60 s off the wall clock;
+  time (API 33); caution beyond 2 s off network time (not 1 s: Android refreshes network
+  time every 18–24 h and counts on with the phone's clock in between, and some chips
+  stamp their fix a few hundred ms late), or beyond 60 s off the wall clock without one;
+- *position source* (alert, dev.7): Android marks the chip's fix as a mock location
+  (another app supplies it). A mock fix also no longer starts or checks TPS's own position;
 - *signal strength*: every system's C/N0 down 10 dB at once (or half the satellites lost)
-  for 3 rounds: caution, jamming or a blocked sky; alert when the AGC fell too; every
-  signal up 6 dB at once to a median of 42 dB-Hz or more: caution, overpowering
-  transmitter (walking out of a building raises every signal too, but only to the
-  ~30–38 dB-Hz phones get from orbit);
-- *receiver gain* (API 33, when reported): down 6 dB from its baseline;
+  for 3 rounds. With the receiver gain reported: gain moved 3 dB or more, alert
+  (interference); gain steady, no warning (the sky got blocked: no extra power in the
+  band). Without it: caution, jamming or a blocked sky, and after 30 rounds the new level
+  becomes normal (indoors now), so the caution lasts about a minute, not as long as the
+  phone stays indoors; interference the gain confirms never becomes normal. Every signal
+  up 6 dB at once: alert with the gain moved; else caution only at a median of 42 dB-Hz
+  or more, an overpowering transmitter (walking out of a building raises every signal
+  too, but only to the ~30–38 dB-Hz phones get from orbit);
+- *receiver gain* (when reported): 6 dB from its baseline, either way (phones disagree on
+  the sign). Read from the API 33 list, or, when the chip leaves that empty, from the
+  deprecated per-measurement field Android names as the fallback (grouped by band:
+  GLONASS's FDMA carriers share one);
 - *signal pattern*: 8+ signals within ±2 dB for 10 rounds, or a median above 48 dB-Hz;
 - *receiver clock*: a common jump of every pseudorange without a reported reset;
 - *measurements fit*: 30% of pseudoranges rejected for 5 rounds;
 - *TPS vs chip*: further apart than 50 m and four times their combined accuracy for 5 rounds.
 Checked against staged attacks on a synthetic sky (`IntegrityTest`: a fake GPS signal is
 caught within 2 s and TPS stays with Galileo and GLONASS; a whole-sky takeover shows as a
-5 km jump; a 3 s time shift, jamming with and without AGC, an overpowering or one-antenna
-transmitter, a clock jump; a clean sky stays quiet) and on Kara's recordings (no false
-alarms). Phones are not survey receivers: this catches crude spoofing and jamming, not a
-careful attacker.
+5 km jump; a 3 s time shift, jamming with and without AGC, with the gain moving either
+way, a blocked sky with steady gain, an overpowering or one-antenna transmitter, a clock
+jump, a start 500 km from ten minutes ago, GNSS time 30 s off the phone's count, time
+running backwards across a reboot, network time 3 s and 8 s off, a mock location; a clean
+sky and a normal restart stay quiet) and on Kara's recordings (no false alarms). On an
+Android 14 emulator the start-up alert and the mock-location alert show end to end.
+Phones are not survey receivers: this catches crude spoofing and jamming, not a careful
+attacker.
+
+**Noise calibration (0.3.0-dev.7).** NIS per system on Kara's three outdoor recordings
+showed GPS ~1, Galileo 0.07–0.24 (its BOC signal ranges better than the chip's reported
+uncertainty says) and GLONASS 1.3–2.3 at the old 1.5×; Doppler NIS 0.26–0.73. Pseudorange
+noise is now 0.5× for Galileo (measured 0.4, held back) and 2× for GLONASS, relative to
+GPS; Doppler noise is 0.65× the chip's uncertainty, floored at 0.2 m/s. NIS now: GPS
+0.85–1.23, Galileo 0.21–0.60, GLONASS 0.72–1.32, Doppler 0.45–1.04. Signals the chip flags
+for multipath get 2× noise (down-weighted, not dropped); the Sony never sets the flag (0 of
+3,383 measurements). A code-against-Doppler check (the slope of each satellite's
+pseudorange minus its integrated Doppler, pooled per system: `FusedFix.codeMinusDopplerMps`)
+reads within ±0.25 m/s on four recordings, so the Sony's Doppler needs no correction.
+Replays from the chip's fix, median / 95% / max: 4.2 / 6.4 / 7.3 m, 2.3 / 5.9 / 7.6 m and
+3.9 / 10.1 / 12.1 m (before: 3.9 / 7.7 / 9.2, 2.5 / 7.2 / 7.5, 5.4 / 9.7 / 14.0). Height
+moved by a few metres, within its noise; it is still the weak part. Without ground truth
+these are distances from the chip, not errors.
 
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;
 the system's "Save as" picker on Android 8–9). TPS adds `SatPvt`
-lines, the chip's satellite positions, which GnssLogger doesn't record. It's how the
+lines, the chip's satellite positions, which GnssLogger doesn't record; the receiver gain
+(the per-measurement `AgcDb` column on every Android version, the API 33 list as `Agc`
+lines); and a note when full tracking turns on or off (Android 14+). It's how the
 decoders get checked against real phones. The file contains your position, and TPS says so.
 
 ## Sources

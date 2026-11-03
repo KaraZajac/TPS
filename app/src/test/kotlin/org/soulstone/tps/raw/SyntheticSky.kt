@@ -25,6 +25,8 @@ class Sky(
     val steered: Boolean = true,
     val codeNoise: Double = 2.0,
     val rateNoise: Double = 0.2,
+    /** A constant error on a system's Doppler, m/s. */
+    val rateBias: (Constellation) -> Double = { 0.0 },
     /** Which satellites are received at second t; all by default. */
     val keep: (t: Int, Constellation, Int) -> Boolean = { _, _, _ -> true },
     /** Extra metres on a satellite's pseudorange at second t. */
@@ -130,7 +132,7 @@ object SyntheticSky {
                     carrierHz = if (system == Constellation.GLONASS) 1_602.0e6 else 1_575.42e6,
                     ionoMeters = 0.0, tropoMeters = tropo,
                     satelliteVelocity = satVelocity, satelliteClockDriftMps = satDrift,
-                    rateMps = closing + DRIFT - satDrift + sky.rateNoise * random.nextGaussian(), rateSigmaMps = 0.3,
+                    rateMps = closing + DRIFT - satDrift + sky.rateBias(system) + sky.rateNoise * random.nextGaussian(), rateSigmaMps = 0.3,
                     cn0DbHz = strength, isbMeters = if (sky.chipBiases) bias else null,
                 )
                 signals += SignalLevel(system, eph.svid, strength, Math.toDegrees(el))

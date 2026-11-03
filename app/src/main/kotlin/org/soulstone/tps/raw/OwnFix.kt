@@ -204,6 +204,7 @@ class OwnFixEngine {
             rateSigmaMps = rateSigma,
             cn0DbHz = m.cn0DbHz,
             isbMeters = m.fullInterSignalBiasNanos?.takeIf { it.isFinite() }?.times(1e-9 * Pseudoranges.C),
+            multipathDetected = m.multipath == MULTIPATH_DETECTED,
         )
     }
 
@@ -228,5 +229,7 @@ class OwnFixEngine {
         const val MAX_DISAGREEMENT_DEG = 3.0
         /** Rates less certain than this (m/s) are left out of the super position. */
         const val MAX_RATE_SIGMA = 20.0
+        /** GnssMeasurement.MULTIPATH_INDICATOR_DETECTED. */
+        const val MULTIPATH_DETECTED = 1
     }
 }

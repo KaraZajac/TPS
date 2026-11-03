@@ -43,14 +43,42 @@ data class RawMeasurement(
     val pvt: ChipPvt? = null,
 )
 
-/** Automatic gain control for one band (API 33): a sudden drop can mean jamming. */
+/** Automatic gain control for one band: a sudden change can mean jamming. */
 data class Agc(val constellation: Constellation, val carrierHz: Long, val levelDb: Double)
+
+/**
+ * Receiver gain from the deprecated per-measurement field, which Android names as the fallback
+ * when its AGC list (API 33) is empty. The gain belongs to the receiver's band, not to one
+ * satellite, so signals are grouped by nominal band centre: GLONASS's FDMA carriers share one.
+ */
+object AgcBands {
+    private val CENTRES = longArrayOf(
+        1_575_420_000, 1_561_098_000, 1_602_000_000, 1_246_000_000, 1_227_600_000,
+        1_176_450_000, 1_207_140_000, 1_268_520_000, 1_278_750_000, 2_492_028_000,
+    )
+
+    fun band(constellation: Constellation, carrierHz: Double?): Long = when {
+        carrierHz != null -> CENTRES.minBy { kotlin.math.abs(it - carrierHz) }
+        constellation == Constellation.GLONASS -> 1_602_000_000
+        constellation == Constellation.BEIDOU -> 1_561_098_000
+        else -> 1_575_420_000
+    }
+
+    /** One entry per system and band, from (system, carrier, gain dB) per signal. */
+    fun fromSignals(signals: List<Triple<Constellation, Double?, Double>>): List<Agc> =
+        signals.filter { it.third.isFinite() }
+            .groupBy { (c, hz, _) -> c to band(c, hz) }
+            .map { (key, v) -> Agc(key.first, key.second, v.map { it.third }.sorted()[v.size / 2]) }
+            .sortedWith(compareBy({ it.constellation.ordinal }, { it.carrierHz }))
+}
 
 /** One `GnssMeasurementsEvent`. */
 data class RawEpoch(
     val clock: RawClock,
     val measurements: List<RawMeasurement>,
     val agc: List<Agc> = emptyList(),
+    /** [agc] came from the per-measurement field (the chip left the AGC list empty). */
+    val agcFromSignals: Boolean = false,
     val fullTracking: Boolean? = null,
     /** Signals whose chip position was sent but couldn't be read, and why (the first). */
     val pvtUnreadable: Int = 0,

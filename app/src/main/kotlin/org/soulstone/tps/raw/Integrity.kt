@@ -6,6 +6,7 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 import org.soulstone.tps.gnss.Constellation
+import org.soulstone.tps.nav.Geodesy
 
 /** How worried to be. */
 enum class Severity { OK, CAUTION, ALERT }
@@ -21,7 +22,9 @@ enum class Threat(val label: String) {
 enum class Check(val title: String) {
     SYSTEMS("systems agree"),
     JUMPS("position jumps"),
+    STARTUP("since last time"),
     TIME("GNSS time"),
+    SOURCE("position source"),
     SIGNALS("signal strength"),
     GAIN("receiver gain"),
     PATTERN("signal pattern"),
@@ -59,7 +62,18 @@ data class IntegrityInput(
     val gnssMinusNetworkMs: Long? = null,
     /** GNSS time minus the phone's wall clock, ms. */
     val gnssMinusWallMs: Long? = null,
+    /** Android marks the chip's position as a mock location (another app supplies it). */
+    val chipMock: Boolean = false,
+    /** GNSS time from the chip's fix, and the phone's monotonic and wall clocks at that fix, ms. */
+    val gnssTimeMs: Long? = null,
+    val elapsedMs: Long? = null,
+    val wallMs: Long? = null,
+    /** Android's boot count: the monotonic clock only counts honestly within one boot. */
+    val bootCount: Int? = null,
 )
+
+/** Where and when TPS last had a position it trusted, kept on the phone between sessions. */
+data class Remembered(val position: Geodetic, val gnssTimeMs: Long, val elapsedMs: Long, val wallMs: Long, val bootCount: Int?)
 
 /**
  * Watches for jamming and spoofing. A phone can't prove either: these are the tells that
@@ -68,11 +82,16 @@ data class IntegrityInput(
  * - **Systems agree**: one system's pseudoranges keep failing the super position's checks while
  *   the others' pass. A fake that covers only GPS is the classic cheap attack.
  * - **Position jumps**: the position moves faster than anything on the ground.
+ * - **Since last time**: at start-up, the position and GNSS time against where and when TPS
+ *   last trusted its fix, so an attack already running when TPS opens can still show.
  * - **GNSS time**: GNSS time jumps against the phone's monotonic clock, or sits far from
  *   Android's network time.
+ * - **Position source**: Android marks the chip's position as a mock location.
  * - **Signal strength**: every system's signals drop at once (jamming, or a blocked sky), or all
- *   get stronger at once (a transmitter overpowering the satellites).
- * - **Receiver gain** (when the chip reports AGC): the gain falls, as it does under interference.
+ *   get stronger at once (a transmitter overpowering the satellites). With the receiver gain
+ *   reported, a drop with steady gain is a blocked sky, and a change with moving gain is not.
+ * - **Receiver gain** (when the chip reports AGC): the gain moves, as it does under
+ *   interference (either way: phones disagree on its sign).
  * - **Signal pattern**: every signal at the same strength, or stronger than phones see from orbit.
  * - **Receiver clock**: the whole clock jumps without the chip reporting a reset.
  * - **Measurements fit**: many satellites don't fit with the rest.
@@ -101,7 +120,15 @@ class IntegrityMonitor {
     // Receiver gain baseline per band.
     private val agcBase = HashMap<Pair<Constellation, Long>, Double>()
     private val agcSeen = HashMap<Pair<Constellation, Long>, Int>()
-    private var gainLowRounds = 0
+    private var gainRounds = 0
+    private var agcEver = false
+    /** This round's largest gain change from its baseline (either sign), dB; null without a settled AGC. */
+    private var gainChange: Double? = null
+    private var blockedUntil = Double.NaN
+    private var blockedText = ""
+
+    private var remembered: Remembered? = null
+    private var startupChecked = false
 
     private val systemRounds = HashMap<Constellation, Int>()
     private var fitRounds = 0
@@ -116,20 +143,30 @@ class IntegrityMonitor {
         latched.clear(); okText.clear(); lastS = Double.NaN
         baseCn0 = Double.NaN; baseCount = Double.NaN; baseBySystem.clear(); baselineRounds = 0
         dropRounds = 0; riseRounds = 0; uniformRounds = 0; strongRounds = 0
-        agcBase.clear(); agcSeen.clear(); gainLowRounds = 0
+        agcBase.clear(); agcSeen.clear(); gainRounds = 0; agcEver = false; gainChange = null; blockedUntil = Double.NaN
+        remembered = null; startupChecked = false
         systemRounds.clear(); fitRounds = 0; chipRounds = 0; seenRestarts = 0; seenClockJumps = 0
         timeBase = null; timeFirst.clear(); lastChip = null
+    }
+
+    /** A new session: [last] is where and when TPS last trusted its fix (null on the first run). */
+    fun startSession(last: Remembered?) {
+        remembered = last
+        startupChecked = false
     }
 
     fun update(input: IntegrityInput): IntegrityReport {
         val now = input.elapsedS
         val dt = if (lastS.isNaN()) 1.0 else (now - lastS).coerceIn(0.0, 30.0)
         lastS = now
-        signals(input, now, dt)
+        // Gain first: the signal-strength check reads this round's gain change.
         gain(input, now)
+        signals(input, now, dt)
         systems(input, now)
         jumps(input, now)
+        startup(input, now)
         time(input, now)
+        source(input, now)
         clock(input, now)
         fit(input, now)
         chip(input, now)
@@ -143,11 +180,11 @@ class IntegrityMonitor {
         return IntegrityReport(worst?.severity ?: Severity.OK, worst, checks)
     }
 
-    private fun raise(check: Check, severity: Severity, threat: Threat, text: String, now: Double) {
+    private fun raise(check: Check, severity: Severity, threat: Threat, text: String, now: Double, holdS: Double? = null) {
         val current = latched[check]
         // A stronger finding replaces a weaker one; a weaker one doesn't cut a stronger one short.
         if (current != null && current.result.severity > severity && current.until > now) return
-        latched[check] = Latch(CheckResult(check, severity, threat, text), now + if (severity == Severity.ALERT) ALERT_HOLD_S else CAUTION_HOLD_S)
+        latched[check] = Latch(CheckResult(check, severity, threat, text), now + (holdS ?: if (severity == Severity.ALERT) ALERT_HOLD_S else CAUTION_HOLD_S))
     }
 
     // ------------------------------------------------------------ signal strength and pattern
@@ -171,21 +208,42 @@ class IntegrityMonitor {
             dropRounds = if (dropped && everySystemDropped) dropRounds + 1 else 0
             val rise = median - baseCn0
             val everySystemRose = bySystem.isNotEmpty() && baseBySystem.all { (c, b) -> bySystem[c]?.let { it >= b + SYSTEM_RISE_DB } ?: false }
-            // Walking out of a building raises every signal too; only a rise to levels phones
-            // don't get from orbit says a transmitter is overpowering the sky.
-            riseRounds = if (!median.isNaN() && rise >= RISE_DB && everySystemRose && median >= RISE_LEVEL_DB) riseRounds + 1 else 0
+            riseRounds = if (!median.isNaN() && rise >= RISE_DB && everySystemRose) riseRounds + 1 else 0
+            // The receiver gain's verdict, when the chip reports it: moved, steady, or unknown.
+            val shifted = gainChange?.let { abs(it) >= GAIN_CORROBORATE_DB }
             if (dropRounds >= PERSIST_ROUNDS) {
-                val jammedGain = latched[Check.GAIN]?.result?.severity == Severity.CAUTION
                 val how = if (median.isNaN()) "Every signal is gone" else "Signals dropped %.0f dB on every system at once".format(drop)
-                if (jammedGain) {
-                    raise(Check.SIGNALS, Severity.ALERT, Threat.JAMMING, "$how and the receiver's gain fell: interference in the band.", now)
-                } else {
-                    raise(Check.SIGNALS, Severity.CAUTION, Threat.JAMMING, "$how: jamming, or the sky got blocked (indoors, a pocket).", now)
+                when (shifted) {
+                    true -> raise(Check.SIGNALS, Severity.ALERT, Threat.JAMMING, "$how and the receiver gain moved %+.0f dB: interference in the band.".format(gainChange), now)
+                    // Steady gain: no extra power in the band, so the sky got blocked.
+                    false -> {
+                        blockedUntil = now + CAUTION_HOLD_S
+                        blockedText = "$how with the receiver gain steady: the sky got blocked (indoors, a pocket), not jamming"
+                        accept(median, count, bySystem, tracked)
+                    }
+                    null -> raise(Check.SIGNALS, Severity.CAUTION, Threat.JAMMING, "$how: jamming, or the sky got blocked (indoors, a pocket).", now)
                 }
             }
             if (riseRounds >= PERSIST_ROUNDS) {
-                raise(Check.SIGNALS, Severity.CAUTION, Threat.SPOOFING, "Every signal got %.0f dB stronger at once: something nearby may be overpowering the satellites.".format(rise), now)
+                when {
+                    shifted == true -> raise(
+                        Check.SIGNALS, Severity.ALERT, Threat.SPOOFING,
+                        "Every signal got %.0f dB stronger and the receiver gain moved %+.0f dB: a transmitter overpowering the satellites.".format(rise, gainChange), now,
+                    )
+                    // Only a rise to levels phones don't get from orbit says a transmitter outshines the sky.
+                    median >= RISE_LEVEL_DB -> raise(
+                        Check.SIGNALS, Severity.CAUTION, Threat.SPOOFING,
+                        "Every signal got %.0f dB stronger at once: something nearby may be overpowering the satellites.".format(rise), now,
+                    )
+                    // Out of a building or a basement: the new normal.
+                    else -> accept(median, count, bySystem, tracked)
+                }
             }
+            // A change that lasts becomes the new normal (indoors now), so a warning doesn't
+            // stay up for as long as the phone stays put.
+            // Not while the gain says interference: that warning stays up as long as it lasts. (A
+            // rise is taken at once unless it's stronger than orbit, which stays suspect.)
+            if (shifted != true && dropRounds >= NEW_NORMAL_ROUNDS) accept(median, count, bySystem, tracked)
         }
         // The baseline follows slow changes (satellites rising and setting), not sudden ones.
         if (dropRounds == 0 && riseRounds == 0 && count >= MIN_SIGNALS && !median.isNaN()) {
@@ -200,6 +258,7 @@ class IntegrityMonitor {
             baselineRounds++
         }
         okText[Check.SIGNALS] = when {
+            !blockedUntil.isNaN() && now <= blockedUntil -> blockedText
             tracked.isEmpty() -> "no signals"
             !established -> "learning what's normal here (%d signals, median %.0f dB-Hz)".format(count, median)
             else -> "normal: %d signals, median %.0f dB-Hz (usual %.0f)".format(count, median, baseCn0)
@@ -227,15 +286,28 @@ class IntegrityMonitor {
         }
     }
 
+    /** Takes the current signal levels as the new baseline. */
+    private fun accept(median: Double, count: Int, bySystem: Map<Constellation, Double>, tracked: List<Pair<Constellation, Double>>) {
+        if (median.isNaN()) return
+        baseCn0 = median
+        baseCount = count.toDouble()
+        baseBySystem.clear()
+        for ((c, m) in bySystem) if (tracked.count { it.first == c } >= 2) baseBySystem[c] = m
+        dropRounds = 0
+        riseRounds = 0
+    }
+
     // ------------------------------------------------------------ receiver gain (AGC)
 
     private fun gain(input: IntegrityInput, now: Double) {
+        gainChange = null
         if (input.agc.isEmpty()) {
-            okText[Check.GAIN] = "not reported by this chip"
+            okText[Check.GAIN] = if (agcEver) "not reported this round" else "not reported by this chip"
             return
         }
-        var lowest = Double.POSITIVE_INFINITY
-        var lowestBand: Pair<Constellation, Long>? = null
+        agcEver = true
+        var biggest: Double? = null
+        var band: Pair<Constellation, Long>? = null
         for (a in input.agc) {
             val key = a.constellation to a.carrierHz / 1_000_000
             val seen = agcSeen[key] ?: 0
@@ -245,16 +317,21 @@ class IntegrityMonitor {
                 agcSeen[key] = seen + 1
                 continue
             }
-            // Under strong interference the gain goes more negative.
+            // Interference moves the gain; which way depends on the phone.
             val change = a.levelDb - base
-            if (change < lowest) { lowest = change; lowestBand = key }
-            if (change > -GAIN_DROP_DB / 2) agcBase[key] = base + (a.levelDb - base) * 0.02
+            if (biggest == null || abs(change) > abs(biggest)) { biggest = change; band = key }
+            // The baseline follows slow drift, not interference.
+            if (abs(change) < GAIN_CHANGE_DB) agcBase[key] = base + (a.levelDb - base) * 0.02
         }
-        gainLowRounds = if (lowest <= -GAIN_DROP_DB) gainLowRounds + 1 else 0
-        if (gainLowRounds >= PERSIST_ROUNDS && lowestBand != null) {
-            raise(Check.GAIN, Severity.CAUTION, Threat.JAMMING, "Receiver gain on %s %d MHz fell %.0f dB: strong interference in the band.".format(lowestBand.first.displayName, lowestBand.second, -lowest), now)
+        gainChange = biggest
+        gainRounds = if (biggest != null && abs(biggest) >= GAIN_CHANGE_DB) gainRounds + 1 else 0
+        if (gainRounds >= PERSIST_ROUNDS && band != null) {
+            raise(
+                Check.GAIN, Severity.CAUTION, Threat.JAMMING,
+                "Receiver gain on %s %d MHz moved %+.0f dB: strong interference in the band.".format(band.first.displayName, band.second, biggest), now,
+            )
         }
-        okText[Check.GAIN] = if (lowestBand == null) "learning what's normal" else "steady"
+        okText[Check.GAIN] = if (band == null) "learning what's normal" else "steady (%+.1f dB from usual)".format(biggest)
     }
 
     // ------------------------------------------------------------ the super position's evidence
@@ -329,6 +406,11 @@ class IntegrityMonitor {
         val wall = input.gnssMinusWallMs
         if (network != null && abs(network) > NETWORK_TIME_MS) {
             raise(Check.TIME, Severity.ALERT, Threat.SPOOFING, "GNSS time is %s off Android's network time.".format(seconds(network)), now)
+        } else if (network != null && abs(network) > NETWORK_CAUTION_MS) {
+            raise(
+                Check.TIME, Severity.CAUTION, Threat.SPOOFING,
+                "GNSS time is %s off Android's network time: false signals shifting time, or the phone's network time is stale.".format(seconds(network)), now,
+            )
         } else if (network == null && wall != null && abs(wall) > WALL_TIME_MS) {
             raise(Check.TIME, Severity.CAUTION, Threat.SPOOFING, "GNSS time is %s off the phone's clock (or the phone's clock is wrong).".format(seconds(wall)), now)
         }
@@ -337,6 +419,66 @@ class IntegrityMonitor {
             wall != null -> "steady; phone clock ${seconds(-wall)}"
             else -> "steady"
         }
+    }
+
+    private fun startup(input: IntegrityInput, now: Double) {
+        val last = remembered
+        if (last == null) {
+            okText[Check.STARTUP] = "nothing to compare with yet"
+            return
+        }
+        if (startupChecked) return
+        okText[Check.STARTUP] = "waiting for the first position"
+        val fused = input.fused?.takeIf { it.usable }
+        val here = fused?.position ?: input.chip ?: return
+        val accuracy = (fused?.horizontalAccuracyM ?: input.chipAccuracyM)?.takeIf { it <= STARTUP_ACCURACY_M } ?: return
+        val gnss = input.gnssTimeMs ?: return
+        startupChecked = true
+        // Within one boot the monotonic clock counts honestly, whatever the satellites say.
+        val elapsedNow = input.elapsedMs
+        val counted = if (input.bootCount != null && input.bootCount == last.bootCount && elapsedNow != null && elapsedNow >= last.elapsedMs) {
+            elapsedNow - last.elapsedMs
+        } else {
+            null
+        }
+        val elapsedS = when {
+            counted != null -> counted / 1_000.0
+            input.wallMs != null -> (input.wallMs - last.wallMs) / 1_000.0
+            else -> (gnss - last.gnssTimeMs) / 1_000.0
+        }
+        // A phone's clock crystal runs up to ~100 ppm off while it sleeps.
+        val toleranceMs = STARTUP_TIME_MS + abs(elapsedS) * 1_000 * CLOCK_RATE_TOLERANCE
+        if (counted != null) {
+            val off = gnss - (last.gnssTimeMs + counted)
+            if (abs(off) > toleranceMs) {
+                raise(Check.STARTUP, Severity.ALERT, Threat.SPOOFING, "GNSS time is %s off what the phone's own clock counted since TPS last ran.".format(seconds(off)), now, STARTUP_HOLD_S)
+            }
+        } else if (gnss < last.gnssTimeMs - toleranceMs) {
+            raise(Check.STARTUP, Severity.ALERT, Threat.SPOOFING, "GNSS time is ${duration((last.gnssTimeMs - gnss) / 1_000.0)} earlier than when TPS last ran.", now, STARTUP_HOLD_S)
+        }
+        val moved = Geodesy.distanceMeters(last.position.latitude, last.position.longitude, here.latitude, here.longitude)
+        // Beyond what the position's own uncertainty explains.
+        val beyond = moved - accuracy
+        if (elapsedS > 0 && beyond > STARTUP_FLOOR_M && beyond / elapsedS > AIRLINER_MPS) {
+            raise(
+                Check.STARTUP, Severity.ALERT, Threat.SPOOFING,
+                "TPS starts ${distance(moved)} from where it last was ${duration(elapsedS)} ago: faster than an airliner.", now, STARTUP_HOLD_S,
+            )
+        }
+        val summary = "${distance(moved)} from last time, ${duration(abs(elapsedS))} ago"
+        // Once the alert has faded, the row still says what start-up found.
+        okText[Check.STARTUP] = when {
+            latched[Check.STARTUP] != null -> "flagged at start-up: $summary"
+            counted != null -> "$summary; GNSS time matches the phone's clock"
+            else -> summary
+        }
+    }
+
+    private fun source(input: IntegrityInput, now: Double) {
+        if (input.chipMock) {
+            raise(Check.SOURCE, Severity.ALERT, Threat.SPOOFING, "Android marks the chip's position as a mock location: another app is supplying it. TPS's own position doesn't use it.", now)
+        }
+        okText[Check.SOURCE] = "the GNSS chip, not a mock-location app"
     }
 
     private fun clock(input: IntegrityInput, now: Double) {
@@ -377,9 +519,20 @@ class IntegrityMonitor {
         okText[Check.CHIP] = "${distance(d)} apart"
     }
 
-    private fun distance(m: Double) = if (m >= 1_000) "%.1f km".format(m / 1_000) else "%.0f m".format(m)
+    private fun distance(m: Double) = when {
+        m >= 100_000 -> "%,.0f km".format(m / 1_000)
+        m >= 1_000 -> "%.1f km".format(m / 1_000)
+        else -> "%.0f m".format(m)
+    }
 
     private fun seconds(ms: Long) = "%+.1f s".format(ms / 1_000.0)
+
+    private fun duration(s: Double) = when {
+        s < 120 -> "%.0f s".format(s)
+        s < 7_200 -> "%.0f min".format(s / 60)
+        s < 172_800 -> "%.0f h".format(s / 3_600)
+        else -> "%.0f days".format(s / 86_400)
+    }
 
     private fun median(v: List<Double>): Double {
         val s = v.sorted()
@@ -410,7 +563,11 @@ class IntegrityMonitor {
         const val UNIFORM_SD_DB = 2.0
         const val UNIFORM_ROUNDS = 10
         const val STRONG_DB = 48.0
-        const val GAIN_DROP_DB = 6.0
+        const val GAIN_CHANGE_DB = 6.0
+        /** A gain change this big confirms a signal change as interference; smaller is steady. */
+        const val GAIN_CORROBORATE_DB = 3.0
+        /** A signal change lasting this many rounds becomes the new normal. */
+        const val NEW_NORMAL_ROUNDS = 30
 
         const val SYSTEM_ROUNDS = 3
         const val JUMP_WINDOW_S = 60.0
@@ -421,6 +578,21 @@ class IntegrityMonitor {
         const val TIME_JUMP_MS = 500L
         const val TIME_BASELINE_ROUNDS = 3
         const val NETWORK_TIME_MS = 5_000L
+        /**
+         * Android refreshes its network time about every 18–24 h and counts on with the phone's
+         * own clock in between, which can drift by a second; some chips also stamp their fix a
+         * few hundred ms late. So 2 s, not 1.
+         */
+        const val NETWORK_CAUTION_MS = 2_000L
+        const val STARTUP_TIME_MS = 1_000L
+        /** How far the phone's clock may run off while it sleeps (100 ppm). */
+        const val CLOCK_RATE_TOLERANCE = 1e-4
+        const val STARTUP_FLOOR_M = 2_000.0
+        /** The start-up check waits for a position at least this good. */
+        const val STARTUP_ACCURACY_M = 1_000.0
+        /** Faster than this between sessions is faster than an airliner (with a jet stream behind it). */
+        const val AIRLINER_MPS = 400.0
+        const val STARTUP_HOLD_S = 120.0
         const val WALL_TIME_MS = 60_000L
         const val FIT_SHARE = 0.3
         const val FIT_ROUNDS = 5

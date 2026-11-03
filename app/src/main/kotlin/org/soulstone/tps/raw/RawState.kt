@@ -19,6 +19,8 @@ data class RawState(
     /** Whether the chip reports full tracking (API 34); null when it doesn't say. */
     val fullTracking: Boolean? = null,
     val agc: List<Agc> = emptyList(),
+    /** [agc] came from the per-measurement field. */
+    val agcFromSignals: Boolean = false,
     val report: OwnFixReport? = null,
     /** Signals in the latest event that came with the chip's satellite position. */
     val pvtSignals: Int = 0,

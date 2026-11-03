@@ -121,6 +121,8 @@ data class Observation(
     val cn0DbHz: Double? = null,
     /** The chip's inter-signal bias for this signal against its reference (GPS L1 C/A), metres. */
     val isbMeters: Double? = null,
+    /** The chip flagged multipath on this signal (GnssMeasurement's multipath indicator). */
+    val multipathDetected: Boolean = false,
 )
 
 data class SolvedSatellite(val constellation: Constellation, val svid: Int, val elevationDeg: Double, val residual: Double)

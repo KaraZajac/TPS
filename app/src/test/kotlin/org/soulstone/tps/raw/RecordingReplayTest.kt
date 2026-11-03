@@ -37,6 +37,8 @@ class RecordingReplayTest {
         val pvt = HashMap<Triple<Long, Int, Int>, List<String>>()
         val fixes = ArrayList<ChipFix>()
         val status = sortedMapOf<Long, MutableList<List<String>>>()
+        // The API 33 AGC list, by the event's wall time: utcTimeMillis, ConstellationType, CarrierFrequencyHz, AgcDb.
+        val agcLines = HashMap<Long, MutableList<Agc>>()
         File(path).forEachLine { line ->
             if (line.startsWith("# ")) {
                 val kind = line.removePrefix("# ").substringBefore(",")
@@ -64,6 +66,8 @@ class RecordingReplayTest {
                     )
                 }
                 "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
+                "Agc" -> agcLines.getOrPut(values[0].toLong()) { ArrayList() } +=
+                    Agc(Constellation.fromAndroid(values[1].toInt()), values[2].toDouble().toLong(), values[3].toDouble())
             }
         }
         val rh = headers.getValue("Raw")
@@ -96,6 +100,7 @@ class RecordingReplayTest {
                     pseudorangeRateUncertaintyMps = d(v, "PseudorangeRateUncertaintyMetersPerSecond") ?: 0.0,
                     carrierHz = d(v, "CarrierFrequencyHz"),
                     fullInterSignalBiasNanos = d(v, "FullInterSignalBiasNanos"),
+                    multipath = v[rh.getValue("MultipathIndicator")].toIntOrNull() ?: 0,
                     pvt = p?.let { (pv, h) ->
                         fun g(k: String) = pv[h.getValue(k)].toDoubleOrNull()
                         ChipPvt(
@@ -114,8 +119,13 @@ class RecordingReplayTest {
             }
             val gpsNs = clock.fullBiasNanos?.let { timeNanos - it - Math.round(clock.biasNanos) } ?: 0L
             val utcMs = gpsNs / 1_000_000 + 315_964_800_000L - (clock.leapSecond ?: 18) * 1000L
+            // The AGC list when the chip filled it, else the per-measurement field, as the app reads them.
+            val listed = r0[rh.getValue("utcTimeMillis")].toLongOrNull()?.let { agcLines[it] }.orEmpty()
+            val perSignal = AgcBands.fromSignals(rows.mapNotNull { v ->
+                d(v, "AgcDb")?.let { Triple(Constellation.fromAndroid(v[rh.getValue("ConstellationType")].toInt()), d(v, "CarrierFrequencyHz"), it) }
+            })
             Moment(
-                RawEpoch(clock, measurements), utcMs,
+                RawEpoch(clock, measurements, listed.ifEmpty { perSignal }, agcFromSignals = listed.isEmpty() && perSignal.isNotEmpty()), utcMs,
                 elapsedMs = r0[rh.getValue("ChipsetElapsedRealtimeNanos")].toLongOrNull()?.div(1_000_000),
                 wallMs = r0[rh.getValue("utcTimeMillis")].toLongOrNull(),
             )
@@ -130,9 +140,12 @@ class RecordingReplayTest {
         val climb = ArrayList<Double>()
         val claimed = ArrayList<Double>()
         val nis = ArrayList<Double>()
+        val nisBySystem = HashMap<Constellation, ArrayList<Double>>()
+        val rateNis = ArrayList<Double>()
         val monitor = IntegrityMonitor()
         val findings = LinkedHashSet<String>()
         var worst = Severity.OK
+        var lastFused: FusedFix? = null
         for (m in moments) {
             val nearest = fixes.minByOrNull { kotlin.math.abs(it.utcMs - m.utcMs) }?.takeIf { kotlin.math.abs(it.utcMs - m.utcMs) <= 600 }
             val chip = nearest?.at
@@ -159,6 +172,7 @@ class RecordingReplayTest {
                             v[sh.getValue("Cn0DbHz")].toDouble(), v[sh.getValue("ElevationDegrees")].toDouble(),
                         )
                     }.filter { it.cn0DbHz > 0 },
+                    agc = m.epoch.agc,
                     fused = report.fused,
                     chip = chip,
                     chipAccuracyM = nearest?.accuracyM,
@@ -172,6 +186,7 @@ class RecordingReplayTest {
             if (integrity.level > worst) worst = integrity.level
             integrity.checks.filter { it.severity != Severity.OK }.forEach { findings += "${it.severity} ${it.check.title}: ${it.text}" }
             val f = report.fused ?: continue
+            lastFused = f
             rejected += f.rejected
             if (f.usable && chip != null) {
                 usable++
@@ -181,6 +196,8 @@ class RecordingReplayTest {
                 climb += abs(f.velocityUp)
                 claimed += f.horizontalAccuracyM
                 f.rangeNis?.let { nis += it }
+                f.rangeNisBySystem.forEach { (c, v) -> nisBySystem.getOrPut(c) { ArrayList() } += v }
+                f.rateNis?.let { rateNis += it }
             }
         }
         fun stats(v: List<Double>): String {
@@ -196,6 +213,14 @@ class RecordingReplayTest {
         println("integrity: worst $worst" + findings.joinToString("") { "\n  $it" })
         println("claimed accuracy: " + stats(claimed) + "; consistency (NIS, ~1 when the noise model is right): " +
             nis.sorted().let { v -> if (v.isEmpty()) "none" else "median %.2f, mean %.2f".format(v[v.size / 2], v.average()) })
+        println("NIS by system: " + nisBySystem.entries.sortedBy { it.key.ordinal }.joinToString { (c, v) -> "%s mean %.2f (n=%d)".format(c.displayName, v.average(), v.size) } +
+            "; Doppler mean " + (if (rateNis.isEmpty()) "none" else "%.2f".format(rateNis.average())))
+        println("code minus Doppler (~0 for an honest chip): " + lastFused?.codeMinusDopplerMps.orEmpty().entries.sortedBy { it.key.ordinal }
+            .joinToString { (c, v) -> "%s %+.2f m/s".format(c.displayName, v) }.ifEmpty { "none" })
+        println("receiver gain: " + moments.count { it.epoch.agc.isNotEmpty() }.let { n ->
+            if (n == 0) "not in this recording" else "in $n of ${moments.size} rounds" + if (moments.any { it.epoch.agcFromSignals }) " (per-measurement field)" else ""
+        })
+        println("multipath flagged on " + moments.sumOf { m -> m.epoch.measurements.count { it.multipath == 1 } } + " of " + moments.sumOf { it.epoch.measurements.size } + " measurements")
         // A normal outing: no warning should have shown.
         assertTrue("false alarm: $findings", worst == Severity.OK)
         if (ph == null || fixes.isEmpty()) {

@@ -420,7 +420,7 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
             }
             if (r.agc.isNotEmpty()) {
                 ChipRow(
-                    "AGC",
+                    if (r.agcFromSignals) "AGC per signal" else "AGC",
                     r.agc.distinctBy { it.constellation to it.carrierHz }.joinToString(" · ") {
                         it.constellation.displayName + " " + org.soulstone.tps.gnss.Bands.label(
                             it.constellation, 0, org.soulstone.tps.gnss.Carrier.of(it.carrierHz.toDouble())

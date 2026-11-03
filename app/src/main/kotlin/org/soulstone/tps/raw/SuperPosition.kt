@@ -51,6 +51,16 @@ data class FusedFix(
      * is too pessimistic, well above too optimistic.
      */
     val rangeNis: Double? = null,
+    /** The same per system, and for the Doppler (pseudorange rate) measurements. */
+    val rangeNisBySystem: Map<Constellation, Double> = emptyMap(),
+    val rateNis: Double? = null,
+    /**
+     * Code against Doppler since the start, per system, m/s: how fast each satellite's
+     * pseudorange drifts from what its Doppler adds up to, pooled over every satellite's
+     * track. About 0 for an honest chip; a calibration check (Peng et al. 2023 found a
+     * constant one on a Xiaomi Mi 8).
+     */
+    val codeMinusDopplerMps: Map<Constellation, Double> = emptyMap(),
 ) {
     val speedMps: Double get() = sqrt(velocityEast * velocityEast + velocityNorth * velocityNorth)
 
@@ -117,6 +127,25 @@ class SuperPosition {
     private var acceptedBySystem = emptyMap<Constellation, Int>()
     private var rejectedBySystem = emptyMap<Constellation, Int>()
     private var rangeNis: Double? = null
+    private var rangeNisBySystem = emptyMap<Constellation, Double>()
+    private var rateNis: Double? = null
+
+    /** One satellite's track for the code-against-Doppler check. */
+    private class Arc(val t0: Double, val start: Double, var lastT: Double, var lastRate: Double) {
+        /** Range change its Doppler adds up to, metres. */
+        var doppler = 0.0
+        var n = 0
+        private var sx = 0.0
+        private var sxx = 0.0
+        private var sy = 0.0
+        private var sxy = 0.0
+        fun add(x: Double, y: Double) { n++; sx += x; sxx += x * x; sy += y; sxy += x * y }
+        val cxy: Double get() = sxy - sx * sy / n
+        val cxx: Double get() = sxx - sx * sx / n
+    }
+    private val arcs = HashMap<Pair<Constellation, Int>, Arc>()
+    /** Per system: finished tracks' summed co-variation and variation in time. */
+    private val codeDoppler = HashMap<Constellation, DoubleArray>()
 
     fun reset() {
         initialized = false
@@ -200,6 +229,7 @@ class SuperPosition {
     }
 
     private fun resetClock(clock: RawClock, fullBias: Long) {
+        endArcs()
         refFullBias = fullBias
         refBias = clock.biasNanos
         discontinuity = clock.discontinuityCount
@@ -218,6 +248,8 @@ class SuperPosition {
         t: Double, clock: RawClock, fullBias: Long, obs: List<Observation>, start: Ecef?, klobuchar: Klobuchar?, gpsSeconds: Double,
         startAccuracyM: Double?,
     ): Boolean {
+        // A new start takes a new clock reference: the code-against-Doppler tracks start again.
+        endArcs()
         // The chip's inter-system biases first: with them every system shares one clock.
         val corrected = obs.filter { it.constellation in SYSTEMS }.map { it.copy(pseudorange = it.pseudorange - (it.isbMeters ?: 0.0)) }
         val bySystem = corrected.groupBy { it.constellation }
@@ -342,6 +374,7 @@ class SuperPosition {
         val receiver = Ecef(x[0], x[1], x[2])
         val geo = Geo.toGeodetic(receiver)
         val rows = ArrayList<Row>()
+        val measuredBy = HashMap<Observation, Double>()
         for (o in obs) {
             if (o.constellation !in SYSTEMS) continue
             val d = o.satellite - receiver
@@ -359,6 +392,7 @@ class SuperPosition {
             val tropo = o.tropoMeters ?: Atmosphere.troposphere(geo, el)
             val predicted = range + x[CLOCK] + (if (own) x[k] else 0.0) - Pseudoranges.C * o.satelliteClock + iono + tropo
             val measured = o.pseudorange - (o.isbMeters ?: 0.0) + steer
+            measuredBy[o] = measured
             val h = DoubleArray(N)
             h[0] = -u[0]; h[1] = -u[1]; h[2] = -u[2]
             h[CLOCK] = 1.0
@@ -375,7 +409,8 @@ class SuperPosition {
                 val hr = DoubleArray(N)
                 hr[3] = -u[0]; hr[4] = -u[1]; hr[5] = -u[2]
                 hr[DRIFT] = 1.0
-                val s = max(rateSigma, MIN_RATE_SIGMA)
+                // The chip's Doppler uncertainty is pessimistic (NIS 0.26–0.73 on Kara's recordings).
+                val s = max(rateSigma * RATE_SIGMA_SCALE, MIN_RATE_SIGMA)
                 rows += Row(hr, rate - (closing + x[DRIFT] - o.satelliteClockDriftMps), s * s, range = false, satellite = o)
             }
         }
@@ -386,6 +421,8 @@ class SuperPosition {
         absorbCommonJump(rows.filter { it.range }, CLOCK)?.let { jump ->
             clockJumps++
             lastClockJumpM = jump
+            // Every pseudorange jumped: the tracks start again.
+            endArcs()
         }
         absorbCommonJump(rows.filter { !it.range }, DRIFT)
 
@@ -398,8 +435,11 @@ class SuperPosition {
         val rangesRejected = ranges - accepted.count { it.range }
         lastRejected = rows.size - accepted.size
         val acceptedSet = accepted.toHashSet()
-        rangeNis = accepted.filter { it.range }.map { it.innovation * it.innovation / (quadratic(it.h) + it.variance) }
-            .takeIf { it.isNotEmpty() }?.average()
+        fun nis(row: Row) = row.innovation * row.innovation / (quadratic(row.h) + row.variance)
+        rangeNis = accepted.filter { it.range }.map(::nis).takeIf { it.isNotEmpty() }?.average()
+        rangeNisBySystem = accepted.filter { it.range }.groupBy { it.satellite.constellation }.mapValues { (_, rows) -> rows.map(::nis).average() }
+        rateNis = accepted.filter { !it.range }.map(::nis).takeIf { it.isNotEmpty() }?.average()
+        trackCodeDoppler(t, accepted, measuredBy)
         acceptedBySystem = rows.filter { it.range && it in acceptedSet }.groupingBy { it.satellite.constellation }.eachCount()
         rejectedBySystem = rows.filter { it.range && it !in acceptedSet }.groupingBy { it.satellite.constellation }.eachCount()
         badRounds = if (ranges >= 4 && rangesRejected * 2 > ranges) badRounds + 1 else 0
@@ -430,6 +470,59 @@ class SuperPosition {
         lastSystems = usedRanges.map { it.constellation }.toSet()
         lastUpdateT = t
         updates++
+    }
+
+    /**
+     * Code against Doppler: for each satellite whose pseudorange and Doppler both fitted, how
+     * far the pseudorange has moved from where its Doppler, added up, says it should be. The
+     * slope of that over time is the bias between code rate and Doppler.
+     */
+    private fun trackCodeDoppler(t: Double, accepted: List<Row>, measuredBy: Map<Observation, Double>) {
+        val withRate = accepted.filter { !it.range }.mapTo(HashSet()) { it.satellite }
+        for (row in accepted) {
+            if (!row.range || row.satellite !in withRate) continue
+            val o = row.satellite
+            val rate = o.rateMps ?: continue
+            val measured = measuredBy[o] ?: continue
+            val key = o.constellation to o.svid
+            val arc = arcs[key]
+            if (arc == null || t - arc.lastT > ARC_GAP_S || t <= arc.lastT) {
+                arc?.let { endArc(key.first, it) }
+                arcs[key] = Arc(t, measured, t, rate).also { it.add(0.0, 0.0) }
+                continue
+            }
+            arc.doppler += (t - arc.lastT) * (rate + arc.lastRate) / 2
+            arc.lastT = t
+            arc.lastRate = rate
+            arc.add(t - arc.t0, measured - arc.start - arc.doppler)
+        }
+        // Satellites gone for good (set, or blocked) end their tracks.
+        arcs.entries.removeAll { (key, arc) -> (t - arc.lastT > ARC_GAP_S).also { if (it) endArc(key.first, arc) } }
+    }
+
+    private fun endArc(system: Constellation, arc: Arc) {
+        if (arc.n < MIN_ARC_POINTS) return
+        val sums = codeDoppler.getOrPut(system) { DoubleArray(2) }
+        sums[0] += arc.cxy
+        sums[1] += arc.cxx
+    }
+
+    private fun endArcs() {
+        for ((key, arc) in arcs) endArc(key.first, arc)
+        arcs.clear()
+    }
+
+    /** Per system, the pooled slope over finished and running tracks, m/s. */
+    private fun codeMinusDoppler(): Map<Constellation, Double> {
+        val sums = HashMap<Constellation, DoubleArray>()
+        for ((system, s) in codeDoppler) sums[system] = s.copyOf()
+        for ((key, arc) in arcs) {
+            if (arc.n < MIN_ARC_POINTS) continue
+            val s = sums.getOrPut(key.first) { DoubleArray(2) }
+            s[0] += arc.cxy
+            s[1] += arc.cxx
+        }
+        return sums.filterValues { it[1] > 0 }.mapValues { (_, s) -> s[0] / s[1] }
     }
 
     /** If [rows] all share one large offset, moves state [index] by it (the clock or its drift jumped) and returns it. */
@@ -488,10 +581,14 @@ class SuperPosition {
     private fun rangeSigma(o: Observation, el: Double): Double {
         val base = max(o.sigma, 3.0 / max(sin(el), 0.1))
         val weak = o.cn0DbHz?.let { Math.pow(10.0, max(0.0, WEAK_CN0 - it) / 20) } ?: 1.0
-        // GLONASS: each satellite on its own frequency, with its own small receiver bias.
-        val glonass = if (o.constellation == Constellation.GLONASS) 1.5 else 1.0
-        // Calibrated on Kara's recordings: at this scale the innovations' NIS averages ~1.
-        return base * weak * glonass * RANGE_SIGMA_SCALE
+        // Each system's share, from its own NIS on Kara's recordings (Qualcomm chip): Galileo's
+        // BOC signal ranges better than the chip's reported uncertainty says (NIS 0.07–0.24 at
+        // 1×); GLONASS, each satellite on its own frequency, worse (NIS 1.3–2.3 at 1.5×).
+        val system = SYSTEM_RANGE_FACTOR[o.constellation] ?: 1.0
+        // A chip that flags multipath on a signal gets believed.
+        val multipath = if (o.multipathDetected) MULTIPATH_FACTOR else 1.0
+        // Overall scale calibrated so the innovations' NIS averages ~1.
+        return base * weak * system * multipath * RANGE_SIGMA_SCALE
     }
 
     // ------------------------------------------------------------------ out
@@ -544,6 +641,9 @@ class SuperPosition {
             lastRestartMoveM = lastRestartMoveM,
             lastRestartGapS = lastRestartGapS,
             rangeNis = rangeNis,
+            rangeNisBySystem = rangeNisBySystem,
+            rateNis = rateNis,
+            codeMinusDopplerMps = codeMinusDoppler(),
         )
     }
 
@@ -579,7 +679,17 @@ class SuperPosition {
         private const val DRIFT_PSD = 0.1
         private const val ISB_PSD = 0.01
 
-        private const val MIN_RATE_SIGMA = 0.3
+        private const val MIN_RATE_SIGMA = 0.2
+        /** The code-against-Doppler check: a gap this long ends a satellite's track; tracks this short don't count. */
+        private const val ARC_GAP_S = 3.0
+        private const val MIN_ARC_POINTS = 10
+        private const val RATE_SIGMA_SCALE = 0.65
+        private const val MULTIPATH_FACTOR = 2.0
+        /** Pseudorange noise per system, relative to GPS. Galileo is held back from its measured 0.4. */
+        private val SYSTEM_RANGE_FACTOR = mapOf(
+            Constellation.GALILEO to 0.5,
+            Constellation.GLONASS to 2.0,
+        )
         private const val RANGE_SIGMA_SCALE = 0.6
         /** A cold start from a snapshot is redone from the chip's fix once the chip is this sure. */
         private const val LATE_START_ACCURACY_M = 20.0

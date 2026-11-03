@@ -20,6 +20,7 @@ import java.util.Locale
  */
 class RawRecorder(private val dir: File) {
     private var writer: BufferedWriter? = null
+    private var lastFullTracking: Boolean? = null
 
     var file: File? = null
         private set
@@ -40,6 +41,7 @@ class RawRecorder(private val dir: File) {
         writer = f.bufferedWriter()
         file = f
         lines = 0
+        lastFullTracking = null
         startedAtMs = System.currentTimeMillis()
         line("# TPS $appVersion raw GNSS recording (GnssLogger format)")
         line("# Version: v3.0.1.0 Platform: ${Build.VERSION.RELEASE} Manufacturer: ${Build.MANUFACTURER} Model: ${Build.MODEL}")
@@ -47,6 +49,7 @@ class RawRecorder(private val dir: File) {
         line("# Fix,Provider,LatitudeDegrees,LongitudeDegrees,AltitudeMeters,SpeedMps,AccuracyMeters,BearingDegrees,UnixTimeMillis,SpeedAccuracyMps,BearingAccuracyDegrees,elapsedRealtimeNanos,VerticalAccuracyMeters")
         line("# Nav,Svid,Type,Status,MessageId,Sub-messageId,Data(Bytes)")
         line("# Status,UnixTimeMillis,SignalCount,SignalIndex,ConstellationType,Svid,CarrierFrequencyHz,Cn0DbHz,AzimuthDegrees,ElevationDegrees,UsedInFix,HasAlmanacData,HasEphemerisData,BasebandCn0DbHz")
+        line("# Agc,utcTimeMillis,ConstellationType,CarrierFrequencyHz,AgcDb")
         line("# SatPvt,utcTimeMillis,TimeNanos,Svid,ConstellationType,CarrierFrequencyHz,Flags,XEcefMeters,YEcefMeters,ZEcefMeters,UreMeters,VxEcefMps,VyEcefMps,VzEcefMps,HardwareCodeBiasMeters,TimeCorrectionMeters,ClockDriftMps,IonoDelayMeters,TropoDelayMeters,TimeOfClockSeconds,TimeOfEphemerisSeconds,IssueOfDataClock,IssueOfDataEphemeris,EphemerisSource")
     }
 
@@ -73,6 +76,12 @@ class RawRecorder(private val dir: File) {
         if (writer == null) return
         val c = event.clock
         val now = System.currentTimeMillis()
+        // Whether the chip duty-cycles changes its measurements; note it (Android 14+ says).
+        val full = epoch?.fullTracking
+        if (full != null && full != lastFullTracking) {
+            line("# Full tracking: ${if (full) "on" else "off (duty-cycled)"} from $now")
+            lastFullTracking = full
+        }
         val clock = listOf(
             c.timeNanos.toString(),
             if (c.hasLeapSecond()) c.leapSecond.toString() else "",
@@ -86,7 +95,8 @@ class RawRecorder(private val dir: File) {
         ).joinToString(",")
         val chipsetElapsed = if (Build.VERSION.SDK_INT >= 29 && c.hasElapsedRealtimeNanos()) c.elapsedRealtimeNanos.toString() else ""
         for (m in event.measurements) {
-            val agc = if (Build.VERSION.SDK_INT < 33 && @Suppress("DEPRECATION") m.hasAutomaticGainControlLevelDb()) {
+            // Deprecated, but Android names it the fallback when the API 33 AGC list is empty.
+            val agc = if (@Suppress("DEPRECATION") m.hasAutomaticGainControlLevelDb()) {
                 @Suppress("DEPRECATION") m.automaticGainControlLevelDb.toString()
             } else {
                 ""

@@ -109,6 +109,15 @@ class SuperPositionTest {
     }
 
     @Test
+    fun aDopplerBiasShowsInTheCodeAgainstDopplerCheck() {
+        // Galileo's Doppler reads 0.5 m/s high; GPS's and GLONASS's are honest.
+        val f = SyntheticSky.filter(Sky(rateBias = { if (it == Constellation.GALILEO) 0.5 else 0.0 }), 180).last().first!!
+        assertEquals(-0.5, f.codeMinusDopplerMps.getValue(Constellation.GALILEO), 0.05)
+        assertEquals(0.0, f.codeMinusDopplerMps.getValue(Constellation.GPS), 0.05)
+        assertEquals(0.0, f.codeMinusDopplerMps.getValue(Constellation.GLONASS), 0.05)
+    }
+
+    @Test
     fun drivingThroughATurnKeepsUp() {
         // 15 m/s north for 30 s, a 90° turn over 6 s, then east.
         val drive = Path { t ->
