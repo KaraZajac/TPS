@@ -97,9 +97,10 @@ private fun offsetOf(chip: Geodetic?, at: Ecef): Offset3? {
 
 /** The super position's line: what it used and how far it is from the chip's fix. */
 @Composable
-private fun FusedRow(f: FusedFix?, offset: Offset3?, prefs: DisplayPrefs) {
+private fun FusedRow(f: FusedFix?, offset: Offset3?, prefs: DisplayPrefs, measured: Int) {
     val detail = when {
-        f == null -> "starting"
+        // Indoors the chip may hand over only a couple of satellites at a time.
+        f == null -> "needs 4 satellites measured at once ($measured now)"
         !f.usable && f.updates < FusedFix.SETTLE_UPDATES -> "settling (${f.updates} of ${FusedFix.SETTLE_UPDATES})"
         !f.usable -> "lost the satellites ${f.sinceUpdateS.toInt()} s ago"
         else -> "${f.satellites} sats" +
@@ -182,7 +183,7 @@ internal fun OwnFixesCard(state: GnssEngine.State, prefs: DisplayPrefs, raw: Raw
                 OffsetPlot(solved.map { it.first.constellation to it.second }, combined, fusedOffset, prefs.shapes)
                 Spacer(Modifier.height(8.dp))
             }
-            FusedRow(report.fused, fusedOffset, prefs)
+            FusedRow(report.fused, fusedOffset, prefs, measured = systems.sumOf { it.withOrbit })
             for (s in systems) SystemRow(s, offsetOf(chip, s.solution), prefs, chipPositions = r.pvtSeen)
             report.combined?.let { c ->
                 CombinedRow(c, combined, prefs)

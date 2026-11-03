@@ -494,7 +494,9 @@ claiming ±6–9 m when its spread said ±4–5); shown only once settled (10 up
 then held through up to 30 s without measurements (±50 m); a hardware clock reset re-learns
 the clock without losing the position. Replays: 3.9 / 2.5 / 5.4 m typical from the chip's
 fix on three recordings, 95% within 7.7 / 7.2 / 9.7 m, no false alarms. Height is the weak
-part: 3–26 m from the chip's.
+part: 3–26 m from the chip's. In Kara's basement (18 dB-Hz, the chip passing on about 2
+satellites a round, its own fix ±33–139 m) TPS rightly stays off: the few snapshots there
+were ~400 m out, and nothing was raised.
 
 **Integrity (0.3.0-dev.5).** `IntegrityMonitor`, each check worded with what else it could
 be, findings held 20 s (caution) or 30 s (alert) after their cause:
@@ -507,7 +509,9 @@ be, findings held 20 s (caution) or 30 s (alert) after their cause:
   time (API 33); caution beyond 60 s off the wall clock;
 - *signal strength*: every system's C/N0 down 10 dB at once (or half the satellites lost)
   for 3 rounds: caution, jamming or a blocked sky; alert when the AGC fell too; every
-  signal up 6 dB at once: caution, overpowering transmitter;
+  signal up 6 dB at once to a median of 42 dB-Hz or more: caution, overpowering
+  transmitter (walking out of a building raises every signal too, but only to the
+  ~30–38 dB-Hz phones get from orbit);
 - *receiver gain* (API 33, when reported): down 6 dB from its baseline;
 - *signal pattern*: 8+ signals within ±2 dB for 10 rounds, or a median above 48 dB-Hz;
 - *receiver clock*: a common jump of every pseudorange without a reported reset;

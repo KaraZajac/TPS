@@ -171,7 +171,9 @@ class IntegrityMonitor {
             dropRounds = if (dropped && everySystemDropped) dropRounds + 1 else 0
             val rise = median - baseCn0
             val everySystemRose = bySystem.isNotEmpty() && baseBySystem.all { (c, b) -> bySystem[c]?.let { it >= b + SYSTEM_RISE_DB } ?: false }
-            riseRounds = if (!median.isNaN() && rise >= RISE_DB && everySystemRose) riseRounds + 1 else 0
+            // Walking out of a building raises every signal too; only a rise to levels phones
+            // don't get from orbit says a transmitter is overpowering the sky.
+            riseRounds = if (!median.isNaN() && rise >= RISE_DB && everySystemRose && median >= RISE_LEVEL_DB) riseRounds + 1 else 0
             if (dropRounds >= PERSIST_ROUNDS) {
                 val jammedGain = latched[Check.GAIN]?.result?.severity == Severity.CAUTION
                 val how = if (median.isNaN()) "Every signal is gone" else "Signals dropped %.0f dB on every system at once".format(drop)
@@ -402,6 +404,8 @@ class IntegrityMonitor {
         const val SYSTEM_DROP_DB = 6.0
         const val RISE_DB = 6.0
         const val SYSTEM_RISE_DB = 4.0
+        /** A rise counts only to a median this strong (open sky gives phones ~30–38 dB-Hz). */
+        const val RISE_LEVEL_DB = 42.0
         const val UNIFORM_MIN_SIGNALS = 8
         const val UNIFORM_SD_DB = 2.0
         const val UNIFORM_ROUNDS = 10

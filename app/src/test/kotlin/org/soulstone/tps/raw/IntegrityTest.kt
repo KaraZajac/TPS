@@ -115,10 +115,19 @@ class IntegrityTest {
 
     @Test
     fun anOverpoweringTransmitterIsACaution() {
-        val w = watch(Sky(cn0 = { t, _, el, r -> 22 + 18 * kotlin.math.sin(Math.toRadians(el)) + 2 * r.nextGaussian() + if (t >= ATTACK) 10 else 0 }))
+        // To take over a receiver, a transmitter has to be well above the sky: here 16 dB.
+        val w = watch(Sky(cn0 = { t, _, el, r -> 22 + 18 * kotlin.math.sin(Math.toRadians(el)) + 2 * r.nextGaussian() + if (t >= ATTACK) 16 else 0 }))
         val at = w.first(Check.SIGNALS, Severity.CAUTION)
         assertNotNull(at)
         assertEquals(Threat.SPOOFING, w.reports[at!!].checks.first { it.check == Check.SIGNALS }.threat)
+    }
+
+    @Test
+    fun walkingOutOfABasementIsNotAnAttack() {
+        // A minute of basement-weak signals, then every signal 18 dB stronger: out of the door.
+        val w = watch(Sky(cn0 = { t, _, el, r -> 5 + 18 * kotlin.math.sin(Math.toRadians(el)) + 2 * r.nextGaussian() + if (t >= ATTACK) 18 else 0 }), 120)
+        assertEquals(null, w.first(Check.SIGNALS, Severity.CAUTION))
+        assertTrue(w.reports.all { it.level == Severity.OK })
     }
 
     @Test

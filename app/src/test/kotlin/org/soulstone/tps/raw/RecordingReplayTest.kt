@@ -202,6 +202,14 @@ class RecordingReplayTest {
             println("(no SatPvt or Fix lines: TPS's own position can't be checked on this one)")
             return
         }
+        // Indoors the chip may hand over a couple of satellites a round: then TPS rightly stays
+        // off, and there's no accuracy to check.
+        val perRound = moments.map { m -> m.epoch.measurements.count { it.pvt != null } }.sorted()
+        if (perRound[perRound.size / 2] < 4) {
+            println("(typically ${perRound[perRound.size / 2]} satellites a round: too few for TPS's own position, which showed in $usable of ${moments.size} rounds)")
+            assertTrue("TPS showed a position from too few satellites", usable < moments.size / 10)
+            return
+        }
         assertTrue("usable in only $usable of ${moments.size} rounds", usable >= moments.size * 0.8)
         val sorted = fused.sorted()
         assertTrue("median ${sorted[sorted.size / 2]} m", sorted[sorted.size / 2] < 6.0)
