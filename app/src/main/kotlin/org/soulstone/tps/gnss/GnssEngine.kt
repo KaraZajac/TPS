@@ -39,6 +39,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import org.soulstone.tps.raw.Agc
 import org.soulstone.tps.raw.AgcBands
+import org.soulstone.tps.raw.Barometer
 import org.soulstone.tps.raw.ChipInfo
 import org.soulstone.tps.raw.ChipPvt
 import org.soulstone.tps.raw.ChipPvtReader
@@ -146,6 +147,9 @@ class GnssEngine private constructor(context: Context) {
     /** Whether the phone lies still, from its accelerometer and gyroscope. GNSS thread only. */
     private val motion = MotionDetector()
     private val sensors: SensorManager? = app.getSystemService(SensorManager::class.java)
+    /** The barometer, where the phone has one: height changes for the super position. GNSS thread only. */
+    private val barometer = Barometer()
+    private val hasBarometer: Boolean = sensors?.getDefaultSensor(Sensor.TYPE_PRESSURE) != null
     private val motionListener = object : SensorEventListener {
         override fun onSensorChanged(e: SensorEvent) {
             val now = SystemClock.elapsedRealtimeNanos()
@@ -153,6 +157,7 @@ class GnssEngine private constructor(context: Context) {
             when (e.sensor.type) {
                 Sensor.TYPE_ACCELEROMETER -> motion.accel(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
                 Sensor.TYPE_GYROSCOPE -> motion.gyro(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+                Sensor.TYPE_PRESSURE -> barometer.sample(now, v[0].toDouble())
             }
         }
 
@@ -258,7 +263,10 @@ class GnssEngine private constructor(context: Context) {
         demoJob?.cancel()
         demoJob = null
         runCatching { sensors?.unregisterListener(motionListener) }
-        handler.post { motion.clear() }
+        handler.post {
+            motion.clear()
+            barometer.clear()
+        }
         real?.let { r ->
             lm?.let { m ->
                 runCatching { m.removeUpdates(r.location) }
@@ -350,14 +358,16 @@ class GnssEngine private constructor(context: Context) {
             integrity.reset()
             integrity.startSession(lastTrusted.load())
         }
-        // The motion sensors, for static mode and the checks: no permission needed, 50 Hz.
+        // The motion sensors, for static mode and the checks (50 Hz), and the barometer, for
+        // height (5 Hz, averaged each second). No permission needed.
         sensors?.let { sm ->
             for (type in intArrayOf(Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_GYROSCOPE)) {
                 sm.getDefaultSensor(type)?.let { runCatching { sm.registerListener(motionListener, it, SensorManager.SENSOR_DELAY_GAME, handler) } }
             }
+            sm.getDefaultSensor(Sensor.TYPE_PRESSURE)?.let { runCatching { sm.registerListener(motionListener, it, BAROMETER_PERIOD_US, handler) } }
         }
         val on = LocationManagerCompat.isLocationEnabled(m) && m.isProviderEnabled(LocationManager.GPS_PROVIDER)
-        update(id) { it.copy(status = if (on) Status.RUNNING else Status.LOCATION_OFF) }
+        update(id) { it.copy(status = if (on) Status.RUNNING else Status.LOCATION_OFF, raw = it.raw.copy(barometer = hasBarometer)) }
         // Raw data is optional: a phone without it still gets everything else.
         registerMeasurements(m, r)
         val navOk = runCatching { m.registerGnssNavigationMessageCallback(r.navigation, handler) }.getOrDefault(false)
@@ -449,8 +459,10 @@ class GnssEngine private constructor(context: Context) {
                 val chip = chipFix?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
                 val moving = motion.reading(SystemClock.elapsedRealtimeNanos())
                 recorder.motion(moving)
+                val pressure = barometer.reading(SystemClock.elapsedRealtimeNanos())
+                pressure?.let { recorder.baro(it) }
                 // Defensive: one odd measurement mustn't take down the GNSS thread.
-                val report = runCatching { ownFix.solve(epoch, chip, s.sky, chipFix?.accuracyM?.toDouble(), moving.motion) }.getOrNull()
+                val report = runCatching { ownFix.solve(epoch, chip, s.sky, chipFix?.accuracyM?.toDouble(), moving.motion, pressure) }.getOrNull()
                 val withPvt = epoch.measurements.mapNotNull { it.pvt }
                 // The super position, as the fix TPS shows; dropped as soon as it isn't usable.
                 val tps = if (report == null) s.tpsFix else report.fused?.takeIf { it.usable }?.let { fusedToFix(it, epoch.clock, s.chipFix) }
@@ -469,6 +481,8 @@ class GnssEngine private constructor(context: Context) {
                             fullTracking = epoch.fullTracking,
                             agc = epoch.agc,
                             agcFromSignals = epoch.agcFromSignals,
+                            barometer = hasBarometer,
+                            pressureHpa = pressure,
                             report = report ?: it.raw.report,
                             pvtSignals = withPvt.size,
                             pvtUnreadable = epoch.pvtUnreadable,
@@ -721,14 +735,16 @@ class GnssEngine private constructor(context: Context) {
         val wallAtFix = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() - elapsedNs) / 1_000_000
         // Height above sea level: the geoid's height under the chip's fix is the same a few metres away.
         val undulation = chip?.let { c -> c.altitudeM?.let { h -> c.mslAltitudeM?.let { h - it } } }
+        // With a barometer, its height: every change in it, and TPS's height averaged over minutes.
+        val height = f.baroHeightM ?: f.position.height
         return Fix(
             latitude = f.position.latitude,
             longitude = f.position.longitude,
             accuracyM = f.horizontalAccuracyM.toFloat(),
-            altitudeM = f.position.height,
-            mslAltitudeM = undulation?.let { f.position.height - it },
+            altitudeM = height,
+            mslAltitudeM = undulation?.let { height - it },
             mslSource = if (undulation != null) chip.mslSource else null,
-            verticalAccuracyM = f.verticalAccuracyM.toFloat(),
+            verticalAccuracyM = (f.baroHeightAccuracyM ?: f.verticalAccuracyM).toFloat(),
             speedMps = f.speedMps.toFloat(),
             bearingDeg = f.bearingDeg?.toFloat(),
             gnssTimeMs = gnssMs ?: chip?.gnssTimeMs ?: wallAtFix,
@@ -790,6 +806,7 @@ class GnssEngine private constructor(context: Context) {
         private const val GPS_EPOCH_UNIX_MS = 315_964_800_000L
 
         private const val REMEMBER_EVERY_MS = 15_000L
+        private const val BAROMETER_PERIOD_US = 200_000
 
         @Volatile private var INSTANCE: GnssEngine? = null
 

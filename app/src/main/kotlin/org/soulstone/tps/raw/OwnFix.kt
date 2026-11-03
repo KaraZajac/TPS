@@ -83,7 +83,10 @@ class OwnFixEngine {
      * Solves one epoch. [chip] is the chip's latest fix (the starting guess, and the place
      * the orbit check looks from); [sky] is the chip's satellite status, to check orbits against.
      */
-    fun solve(epoch: RawEpoch, chip: Geodetic?, sky: SkySnapshot?, chipAccuracyM: Double? = null, motion: Motion = Motion.UNKNOWN): OwnFixReport {
+    fun solve(
+        epoch: RawEpoch, chip: Geodetic?, sky: SkySnapshot?, chipAccuracyM: Double? = null,
+        motion: Motion = Motion.UNKNOWN, pressureHpa: Double? = null,
+    ): OwnFixReport {
         // One signal per satellite, on the upper L band (L1, E1, G1, B1): the broadcast clocks
         // and group delays are for those, so a dual-frequency phone's L5/E5a signals are left out.
         val primary = epoch.measurements
@@ -154,6 +157,7 @@ class OwnFixEngine {
             epoch.clock, observations, chipEcef ?: combined?.ecef, klobuchar, receiveGpsSeconds,
             startAccuracyM = chipAccuracyM?.takeIf { chipEcef != null },
             motion = motion,
+            pressureHpa = pressureHpa,
         )
         return OwnFixReport(
             systems = systems,

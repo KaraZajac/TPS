@@ -14,8 +14,8 @@ android {
         applicationId = "org.soulstone.tps"
         minSdk = 26
         targetSdk = 36
-        versionCode = 13
-        versionName = "0.3.0-dev.9"
+        versionCode = 14
+        versionName = "0.3.0-dev.10"
         // On-device checks of what only a real Android runtime can answer (run on an emulator).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

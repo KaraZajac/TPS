@@ -53,7 +53,10 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   30 s of lost or jammed signal (saying so), and starts from the chip's fix when there is one.
   Measurements well off the fit count for less. With the phone at rest (its motion sensors,
   no permission needed) the velocity is held at zero, so the position stops wandering and the
-  height settles, and the position holds through any loss of signal.
+  height settles, and the position holds through any loss of signal. With a barometer (where
+  the phone has one), every change in height comes from it within a second, and TPS's height
+  is averaged over minutes against it, so stairs and hills show at once and the height stops
+  wandering with reflections.
 - **Holding instead of following**: if the signals put TPS somewhere it couldn't have
   reached (nowhere while the phone lies still, 50 m/s otherwise), or move it while the phone
   lies still, TPS keeps its position and says "holding", until the signals agree with it

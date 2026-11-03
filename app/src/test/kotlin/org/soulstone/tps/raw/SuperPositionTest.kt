@@ -3,6 +3,7 @@ package org.soulstone.tps.raw
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 import org.junit.Assert.assertEquals
@@ -214,6 +215,24 @@ class SuperPositionTest {
         assertTrue(horizontalError(still[149].first!!, still[149].second) < 2.0)
         // Without the sensors it lets go after 30 s, as before.
         assertTrue(SyntheticSky.filter(loss, 200)[100].first?.usable != true)
+    }
+
+    @Test
+    fun aBarometerFollowsAClimbTheSatellitesBlur() {
+        // Weak signals and reflections that last a minute (5 m a satellite); five minutes in, up
+        // 30 m at 0.5 m/s. TPS's own height lags and wanders; the barometer's climbs with it.
+        val weak = { _: Int, _: Constellation, el: Double, r: java.util.Random -> 18 + 8 * sin(Math.toRadians(el)) + 2 * r.nextGaussian() }
+        val climb = { t: Double -> if (t < 300) 0.0 else min(30.0, (t - 300) * 0.5) }
+        val r = SyntheticSky.filter(Sky(climb = climb, barometer = true, codeNoise = 4.0, multipathM = 5.0, cn0 = weak), 600).drop(300)
+        fun rms(v: List<Double>) = sqrt(v.sumOf { it * it } / v.size)
+        val own = rms(r.map { (f, t) -> f!!.position.height - Geo.toGeodetic(t).height })
+        val baro = rms(r.map { (f, t) -> f!!.baroHeightM!! - Geo.toGeodetic(t).height })
+        assertTrue("barometer %.2f m against own %.2f m".format(baro, own), baro < own / 2)
+    }
+
+    @Test
+    fun withoutABarometerThereIsNoBarometerHeight() {
+        assertTrue(SyntheticSky.filter(Sky(), 60).all { it.first?.baroHeightM == null })
     }
 
     @Test

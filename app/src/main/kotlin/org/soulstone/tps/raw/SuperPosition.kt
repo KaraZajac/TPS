@@ -78,6 +78,9 @@ data class FusedFix(
     val lastReleaseMoveM: Double? = null,
     /** Measurements this round that counted for less because they sat well off the fit. */
     val downweighted: Int = 0,
+    /** TPS's height steadied by the barometer ([BaroHeight]), on the same ellipsoid, and its 68% uncertainty; null without one. */
+    val baroHeightM: Double? = null,
+    val baroHeightAccuracyM: Double? = null,
 ) {
     val speedMps: Double get() = sqrt(velocityEast * velocityEast + velocityNorth * velocityNorth)
 
@@ -128,6 +131,8 @@ enum class Suspect(val label: String) {
  *   until the signals agree with it again or the new place comes within reach.
  * - **Static mode.** While the motion sensors say still, and the signals agree, the velocity is
  *   held at zero: the position stops wandering, and the height settles.
+ * - **Barometer.** Where the phone has one, [BaroHeight] takes every change in height from it,
+ *   and its offset from this filter's height averaged over minutes.
  *
  * Pseudoranges are re-referenced to a fixed clock offset (the chip's at the start), so the
  * receiver clock simply drifts, by the same drift the Doppler sees, whether or not the chip
@@ -180,6 +185,8 @@ class SuperPosition(private val robust: Boolean = true) {
     private var lastDownweighted = 0
     /** Re-centred at rest: the next update re-fits the clock before judging the signals. */
     private var refitClock = false
+    private val baroHeight = BaroHeight()
+    private var pressureHpa: Double? = null
     /** Seconds the phone may have been moving since the last good update (all of them, without motion sensors). */
     private var movingS = 0.0
 
@@ -214,9 +221,10 @@ class SuperPosition(private val robust: Boolean = true) {
      */
     fun step(
         clock: RawClock, observations: List<Observation>, start: Ecef?, klobuchar: Klobuchar?, gpsSeconds: Double,
-        startAccuracyM: Double? = null, motion: Motion = Motion.UNKNOWN,
+        startAccuracyM: Double? = null, motion: Motion = Motion.UNKNOWN, pressureHpa: Double? = null,
     ): FusedFix? {
         this.motion = motion
+        this.pressureHpa = pressureHpa
         // Picked up: where it lay is no longer where it is.
         if (motion != Motion.STILL) anchor = null
         val fullBias = clock.fullBiasNanos
@@ -902,6 +910,7 @@ class SuperPosition(private val robust: Boolean = true) {
             return max(s, 0.0)
         }
         val horizontal = sqrt(variance(east) + variance(north))
+        val vertical = sqrt(variance(up))
         val since = lastT - lastUpdateT
         trusted = when {
             // Holding against suspect signals: for as long as the held position stays useful.
@@ -910,6 +919,8 @@ class SuperPosition(private val robust: Boolean = true) {
             // Lying still, the position holds through a loss for as long as it stays good.
             else -> (since <= FusedFix.HOLD_S || anchor != null) && horizontal <= FusedFix.HOLD_ACCURACY_M
         }
+        // The barometer's height filter: TPS's height feeds it only while trusted and not held.
+        val baro = baroHeight.step(lastT, pressureHpa, geo.height.takeIf { trusted && suspect == null }, vertical)
         return FusedFix(
             position = geo,
             ecef = ecef,
@@ -917,7 +928,7 @@ class SuperPosition(private val robust: Boolean = true) {
             velocityNorth = v[1],
             velocityUp = v[2],
             horizontalAccuracyM = horizontal,
-            verticalAccuracyM = sqrt(variance(up)),
+            verticalAccuracyM = vertical,
             satellites = lastSatellites,
             systems = lastSystems,
             rejected = lastRejected,
@@ -947,6 +958,8 @@ class SuperPosition(private val robust: Boolean = true) {
             lastReleaseAfterS = lastReleaseAfterS,
             lastReleaseMoveM = lastReleaseMoveM,
             downweighted = lastDownweighted,
+            baroHeightM = baro?.first,
+            baroHeightAccuracyM = baro?.second,
         )
     }
 

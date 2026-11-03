@@ -54,6 +54,7 @@ class RawRecorder(private val dir: File) {
         line("# Agc,utcTimeMillis,ConstellationType,CarrierFrequencyHz,AgcDb")
         line("# Integrity,utcTimeMillis,Level,Check,Text")
         line("# Motion,utcTimeMillis,State,AccelSdMps2,GyroRmsRadps")
+        line("# Baro,utcTimeMillis,PressureHpa")
         line("# SatPvt,utcTimeMillis,TimeNanos,Svid,ConstellationType,CarrierFrequencyHz,Flags,XEcefMeters,YEcefMeters,ZEcefMeters,UreMeters,VxEcefMps,VyEcefMps,VzEcefMps,HardwareCodeBiasMeters,TimeCorrectionMeters,ClockDriftMps,IonoDelayMeters,TropoDelayMeters,TimeOfClockSeconds,TimeOfEphemerisSeconds,IssueOfDataClock,IssueOfDataEphemeris,EphemerisSource")
     }
 
@@ -89,6 +90,12 @@ class RawRecorder(private val dir: File) {
     fun motion(r: MotionReading) {
         if (writer == null) return
         line("Motion,${System.currentTimeMillis()},${r.motion.name},${r.accelSdMps2?.let { "%.4f".format(Locale.ROOT, it) } ?: ""},${r.gyroRmsRadps?.let { "%.4f".format(Locale.ROOT, it) } ?: ""}")
+    }
+
+    /** The barometer's mean over the last second, hPa (once a measurement event). */
+    fun baro(hPa: Double) {
+        if (writer == null) return
+        line("Baro,${System.currentTimeMillis()},${"%.3f".format(Locale.ROOT, hPa)}")
     }
 
     /** [epoch] is the same event as TPS read it, for the chip's satellite positions. */

@@ -21,6 +21,9 @@ data class RawState(
     val agc: List<Agc> = emptyList(),
     /** [agc] came from the per-measurement field. */
     val agcFromSignals: Boolean = false,
+    /** Whether the phone has a barometer (null until TPS has looked), and its latest second's mean, hPa. */
+    val barometer: Boolean? = null,
+    val pressureHpa: Double? = null,
     val report: OwnFixReport? = null,
     /** Signals in the latest event that came with the chip's satellite position. */
     val pvtSignals: Int = 0,

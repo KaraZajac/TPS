@@ -626,6 +626,31 @@ these are distances from the chip, not errors.
   smooth start with the phone perfectly still (a ship) could read as a drag, and the warning
   says so; hand-held and pocket readings haven't been recorded yet.
 
+**Barometer (0.3.0-dev.10).** Where the phone has one (`TYPE_PRESSURE`, no permission, 5 Hz
+averaged each second), TPS's height is the barometer's standard-atmosphere height plus an
+offset: the running mean of TPS's height minus the barometer's over up to 10 minutes, taken
+while TPS trusts its fix and weighted by its vertical uncertainty (`BaroHeight`, kept apart from
+the super position). Every change in height comes from the barometer within a second; the GNSS
+height's reflection errors, which last minutes, average down; the weather moves the offset and
+the mean follows minutes behind. A difference more than 5σ (at least 30 m) from the mean for 3
+rounds (a plane's cabin, not a climb) starts the mean over, and no barometer height shows
+meanwhile. Its ± comes from how much TPS's height actually wanders around the mean, because
+TPS's own vertical claim knows nothing of minute-long reflections (on the synthetic sky with
+them it claims ±1–2 m while 10 m off).
+- Tried first and dropped: the offset as a state of the super position. That filter treats GNSS
+  errors as independent from second to second, so it grew confident within seconds and locked in
+  that moment's reflection error, 10–18 m off for minutes on the synthetic sky.
+- Synthetic results, barometer height against TPS's own in the same runs (`BarometerTest`,
+  `SuperPositionTest`): weak signals with minute-long reflections, a 30 m climb 2.0 m RMS against
+  8.4 m, stairs 3.1 against 8.4 m; standing on a clean or weak sky, about half the spread;
+  standing in heavy reflections, as good as TPS's height averaged over minutes (better after
+  ~10 minutes, no better at first); a 30 hPa jump shows no height until a fresh start; a 3 hPa/h
+  front costs ~2 m.
+- The main screen's height and its ± are the barometer's where there is one; the CHIP card says
+  whether the phone has a barometer and whether it's steadying TPS's height; OWN FIXES adds
+  "baro"; recordings get `Baro` lines and the replay test feeds them back. Whether Kara's Sony
+  has a barometer, the CHIP card will say.
+
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;
 the system's "Save as" picker on Android 8–9). TPS adds `SatPvt`

@@ -111,7 +111,8 @@ private fun FusedRow(f: FusedFix?, offset: Offset3?, prefs: DisplayPrefs, measur
             (offset?.let { "  " + Format.distance(it.horizontal, prefs.units) + " " + it.direction() } ?: "") +
             "  ±" + Format.distance(f.horizontalAccuracyM, prefs.units) +
             (if (f.rejected > 0) "  ${f.rejected} left out" else "") +
-            (if (f.still) "  at rest" else "")
+            (if (f.still) "  at rest" else "") +
+            (if (f.baroHeightM != null) "  baro" else "")
     }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
         Box(
@@ -430,6 +431,19 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
                         it.constellation.displayName + " " + org.soulstone.tps.gnss.Bands.label(
                             it.constellation, 0, org.soulstone.tps.gnss.Carrier.of(it.carrierHz.toDouble())
                         ) + " " + String.format(java.util.Locale.ROOT, "%.1f dB", it.levelDb)
+                    }
+                )
+            }
+            // The barometer: whether there is one, and whether it's steadying TPS's height.
+            r.barometer?.let { has ->
+                ChipRow(
+                    "barometer",
+                    when {
+                        !has -> "none on this phone"
+                        r.pressureHpa == null -> "waiting"
+                        report?.fused?.baroHeightM != null ->
+                            String.format(java.util.Locale.ROOT, "%.1f hPa · steadying TPS's height", r.pressureHpa)
+                        else -> String.format(java.util.Locale.ROOT, "%.1f hPa · waiting for TPS's height", r.pressureHpa)
                     }
                 )
             }

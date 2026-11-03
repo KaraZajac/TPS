@@ -44,6 +44,8 @@ class RecordingReplayTest {
         val phoneIntegrity = ArrayList<List<String>>()
         // The motion sensors' verdict (dev.9 on), by wall time.
         val motionLines = sortedMapOf<Long, Motion>()
+        // The barometer's second-by-second mean (dev.10 on), by wall time.
+        val baroLines = sortedMapOf<Long, Double>()
         File(path).forEachLine { line ->
             if (line.startsWith("# ")) {
                 val kind = line.removePrefix("# ").substringBefore(",")
@@ -73,6 +75,7 @@ class RecordingReplayTest {
                 "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
                 "Integrity" -> phoneIntegrity += values
                 "Motion" -> motionLines[values[0].toLong()] = runCatching { Motion.valueOf(values[1]) }.getOrDefault(Motion.UNKNOWN)
+                "Baro" -> values[1].toDoubleOrNull()?.let { baroLines[values[0].toLong()] = it }
                 "Agc" -> agcLines.getOrPut(values[0].toLong()) { ArrayList() } +=
                     Agc(Constellation.fromAndroid(values[1].toInt()), values[2].toDouble().toLong(), values[3].toDouble())
             }
@@ -144,6 +147,7 @@ class RecordingReplayTest {
         var usable = 0
         var rejected = 0
         val vertical = ArrayList<Double>()
+        val baroVertical = ArrayList<Double>()
         val climb = ArrayList<Double>()
         val claimed = ArrayList<Double>()
         val nis = ArrayList<Double>()
@@ -165,6 +169,8 @@ class RecordingReplayTest {
             // What the motion sensors said at this round (the last verdict at or before it).
             val motion = m.wallMs?.let { w -> motionLines.headMap(w + 1).entries.lastOrNull()?.value } ?: Motion.UNKNOWN
             motionSeen.merge(motion, 1, Int::plus)
+            // The barometer's reading at this round, if it's recent.
+            val pressure = m.wallMs?.let { w -> baroLines.headMap(w + 1).entries.lastOrNull()?.takeIf { w - it.key <= 2_000 }?.value }
             val nearest = fixes.minByOrNull { kotlin.math.abs(it.utcMs - m.utcMs) }?.takeIf { kotlin.math.abs(it.utcMs - m.utcMs) <= 600 }
             val chip = nearest?.at
             val statusRows = status.headMap(m.utcMs + 1).entries.lastOrNull()?.value
@@ -178,7 +184,7 @@ class RecordingReplayTest {
                     )
                 })
             }
-            val report = engine.solve(m.epoch, chip, sky, nearest?.accuracyM, motion)
+            val report = engine.solve(m.epoch, chip, sky, nearest?.accuracyM, motion, pressure)
             if (chip != null) report.combined?.let { snapshot += Solver.offset(chip, it.ecef).let { e -> hypot(e[0], e[1]) } }
             // The integrity checks, fed as the app feeds them.
             val integrity = monitor.update(
@@ -217,6 +223,7 @@ class RecordingReplayTest {
                 val e = Solver.offset(chip, f.ecef)
                 fused += hypot(e[0], e[1])
                 vertical += e[2]
+                if (chip != null) f.baroHeightM?.let { baroVertical += it - chip.height }
                 climb += abs(f.velocityUp)
                 claimed += f.horizontalAccuracyM
                 withinClaims += hypot(e[0], e[1]) <= 2 * hypot(f.horizontalAccuracyM, nearest?.accuracyM ?: 0.0)
@@ -234,6 +241,7 @@ class RecordingReplayTest {
         println("snapshot, all systems: " + stats(snapshot))
         println("super position:        " + stats(fused))
         println("height, TPS minus chip: " + vertical.sorted().let { v -> if (v.isEmpty()) "none" else "median %+.1f m, range %+.1f to %+.1f m".format(v[v.size / 2], v.first(), v.last()) })
+        if (baroLines.isNotEmpty()) println("height with the barometer, minus chip: " + baroVertical.sorted().let { v -> if (v.isEmpty()) "none yet" else "median %+.1f m, range %+.1f to %+.1f m (n=%d)".format(v[v.size / 2], v.first(), v.last(), v.size) })
         println("vertical speed (should be ~0 standing): " + stats(climb).replace(" m,", " m/s,").replace(" m (", " m/s ("))
         println("integrity: worst $worst" + findings.joinToString("") { "\n  $it" })
         println("claimed accuracy: " + stats(claimed) + "; consistency (NIS, ~1 when the noise model is right): " +
