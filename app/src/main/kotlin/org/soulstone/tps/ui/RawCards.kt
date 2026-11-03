@@ -48,6 +48,8 @@ import org.soulstone.tps.raw.ChipInfo
 import org.soulstone.tps.raw.Ecef
 import org.soulstone.tps.raw.EphemerisSource
 import org.soulstone.tps.raw.FusedFix
+import org.soulstone.tps.raw.IntegrityReport
+import org.soulstone.tps.raw.Severity
 import org.soulstone.tps.raw.Geodetic
 import org.soulstone.tps.raw.NavType
 import org.soulstone.tps.raw.OwnFixReport
@@ -98,7 +100,7 @@ private fun offsetOf(chip: Geodetic?, at: Ecef): Offset3? {
 private fun FusedRow(f: FusedFix?, offset: Offset3?, prefs: DisplayPrefs) {
     val detail = when {
         f == null -> "starting"
-        !f.usable && f.updates < FusedFix.MIN_UPDATES -> "settling"
+        !f.usable && f.updates < FusedFix.SETTLE_UPDATES -> "settling (${f.updates} of ${FusedFix.SETTLE_UPDATES})"
         !f.usable -> "lost the satellites ${f.sinceUpdateS.toInt()} s ago"
         else -> "${f.satellites} sats" +
             (offset?.let { "  " + Format.distance(it.horizontal, prefs.units) + " " + it.direction() } ?: "") +
@@ -475,6 +477,75 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
             Note(
                 "Save puts the recording in Download/TPS, in Google's GnssLogger format plus the chip's " +
                     "satellite positions. It contains your position: share it only with people you trust."
+            )
+        }
+    }
+}
+
+/** Every integrity check and what it sees now; the headline finding first in colour. */
+@Composable
+internal fun IntegrityCard(report: IntegrityReport) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                CardTitle("INTEGRITY")
+                Spacer(Modifier.weight(1f))
+                if (report.level == Severity.OK) {
+                    Box(
+                        Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(FixColors.Green)
+                    )
+                } else {
+                    androidx.compose.material3.Icon(
+                        painter = androidx.compose.ui.res.painterResource(org.soulstone.tps.R.drawable.ic_warning),
+                        contentDescription = report.headline?.threat?.label,
+                        tint = if (report.level == Severity.ALERT) FixColors.Red else FixColors.Orange,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Note(
+                when (report.level) {
+                    Severity.OK -> "No signs of jamming or spoofing."
+                    Severity.CAUTION -> "Something looks off; see the orange line."
+                    Severity.ALERT -> "Strong signs of interference or false signals; see the red line."
+                }
+            )
+            Spacer(Modifier.height(6.dp))
+            for (c in report.checks) {
+                Row(Modifier.fillMaxWidth().padding(vertical = 1.dp)) {
+                    Text(
+                        text = c.check.title,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 11.sp,
+                        fontFamily = KibernetykMono,
+                        modifier = Modifier.width(monoWidthOf(18, 11))
+                    )
+                    Text(
+                        text = c.text,
+                        color = when (c.severity) {
+                            Severity.OK -> MaterialTheme.colorScheme.onSurface
+                            Severity.CAUTION -> FixColors.Orange
+                            Severity.ALERT -> FixColors.Red
+                        },
+                        fontSize = 11.sp,
+                        fontFamily = KibernetykMono,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Note(
+                "A phone can't prove jamming or spoofing; these are the tells one antenna can see. " +
+                    "Without the chip reporting its receiver gain, a jammer and a blocked sky look alike, and a careful " +
+                    "spoofer that fakes every system consistently, and slowly, can pass every check."
             )
         }
     }

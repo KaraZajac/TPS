@@ -86,6 +86,10 @@ internal fun ConstellationsSheet(state: GnssEngine.State, prefs: DisplayPrefs, r
             Spacer(Modifier.height(8.dp))
         }
         PositionCard(state, prefs)
+        state.integrity?.let {
+            Spacer(Modifier.height(8.dp))
+            IntegrityCard(it)
+        }
         if (raw != null) {
             Spacer(Modifier.height(8.dp))
             OwnFixesCard(state, prefs, raw)

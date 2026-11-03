@@ -38,6 +38,10 @@ import org.soulstone.tps.raw.ChipInfo
 import org.soulstone.tps.raw.ChipPvt
 import org.soulstone.tps.raw.ChipPvtReader
 import org.soulstone.tps.raw.FusedFix
+import org.soulstone.tps.raw.IntegrityInput
+import org.soulstone.tps.raw.IntegrityMonitor
+import org.soulstone.tps.raw.IntegrityReport
+import org.soulstone.tps.raw.SignalLevel
 import org.soulstone.tps.raw.Geodetic
 import org.soulstone.tps.raw.NavMessage
 import org.soulstone.tps.raw.OwnFixEngine
@@ -98,6 +102,8 @@ class GnssEngine private constructor(context: Context) {
         /** Satellites behind the shown fix. */
         val usedSatellites: Int = 0,
         val raw: RawState = RawState(),
+        /** Signs of jamming or spoofing; null without raw measurements (demo sky, older phones). */
+        val integrity: IntegrityReport? = null,
     ) {
         val running: Boolean get() = wanted && status == Status.RUNNING
         val fixAgeMs: Long? get() = fix?.let { (nowMs - it.elapsedRealtimeMs).coerceAtLeast(0) }
@@ -121,6 +127,9 @@ class GnssEngine private constructor(context: Context) {
 
     /** GNSS thread only. */
     private val recorder = RawRecorder(File(app.filesDir, "recordings"))
+
+    /** Jamming and spoofing checks. GNSS thread only; starts afresh with each session. */
+    private val integrity = IntegrityMonitor()
     private val _recorder = MutableStateFlow(RecorderState())
     val recorderState: StateFlow<RecorderState> = _recorder.asStateFlow()
 
@@ -302,6 +311,7 @@ class GnssEngine private constructor(context: Context) {
             return
         }
         real = r
+        handler.post { integrity.reset() }
         val on = LocationManagerCompat.isLocationEnabled(m) && m.isProviderEnabled(LocationManager.GPS_PROVIDER)
         update(id) { it.copy(status = if (on) Status.RUNNING else Status.LOCATION_OFF) }
         // Raw data is optional: a phone without it still gets everything else.
@@ -392,14 +402,16 @@ class GnssEngine private constructor(context: Context) {
                 // Own fixes are compared with, and checked against, the chip's fix: never TPS's own.
                 val chip = s.chipFix?.takeIf { s.chipFixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
                 // Defensive: one odd measurement mustn't take down the GNSS thread.
-                val report = runCatching { ownFix.solve(epoch, chip, s.sky) }.getOrNull()
+                val report = runCatching { ownFix.solve(epoch, chip, s.sky, s.chipFix?.takeIf { s.chipFixValid }?.accuracyM?.toDouble()) }.getOrNull()
                 val withPvt = epoch.measurements.mapNotNull { it.pvt }
                 // The super position, as the fix TPS shows; dropped as soon as it isn't usable.
                 val tps = if (report == null) s.tpsFix else report.fused?.takeIf { it.usable }?.let { fusedToFix(it, epoch.clock, s.chipFix) }
                 if (report != null) tps?.let { recorder.tpsFix(it) }
+                val checks = runCatching { integrity.update(integrityInput(epoch, report?.fused, s, chip)) }.getOrNull()
                 update(id) {
                     it.copy(
                         tpsFix = tps,
+                        integrity = checks ?: it.integrity,
                         raw = it.raw.copy(
                             measurements = RawStatus.READY,
                             epochs = it.raw.epochs + 1,
@@ -571,11 +583,44 @@ class GnssEngine private constructor(context: Context) {
         )
     }
 
+    /** UTC from the chip's GNSS clock at the measurement, ms; null before it knows GPS time. */
+    private fun gnssUtcMs(clock: RawClock): Long? {
+        val leap = clock.leapSecond ?: org.soulstone.tps.raw.Pseudoranges.DEFAULT_LEAP_SECONDS
+        return clock.fullBiasNanos?.let { (clock.timeNanos - it - Math.round(clock.biasNanos)) / 1_000_000 + GPS_EPOCH_UNIX_MS - leap * 1_000L }
+    }
+
+    /** Everything the integrity checks look at this round. */
+    private fun integrityInput(epoch: RawEpoch, fused: FusedFix?, s: State, chip: Geodetic?): IntegrityInput {
+        val elapsedNs = epoch.clock.elapsedRealtimeNanos ?: SystemClock.elapsedRealtimeNanos()
+        // Time comes from the chip's fix (any phone has one; it's the time TPS shows), not the
+        // raw clock: the emulator's raw clock, for one, runs years off.
+        val fix = s.chipFix?.takeIf { s.chipFixValid }
+        val gnssMs = fix?.gnssTimeMs?.takeIf { it > 0 }
+        val ageMs = fix?.let { SystemClock.elapsedRealtime() - it.elapsedRealtimeMs } ?: 0L
+        // Android's network (NTP) time, when it has one (Android 13+): no network use of TPS's own.
+        val network = if (Build.VERSION.SDK_INT >= 33 && gnssMs != null) {
+            runCatching { gnssMs - (SystemClock.currentNetworkTimeClock().millis() - ageMs) }.getOrNull()
+        } else {
+            null
+        }
+        return IntegrityInput(
+            elapsedS = elapsedNs * 1e-9,
+            signals = s.sky.satellites.filter { it.cn0DbHz > 0 }.map {
+                SignalLevel(it.constellation, it.svid, it.cn0DbHz.toDouble(), it.elevationDeg.toDouble().takeIf { _ -> it.positionKnown })
+            },
+            agc = epoch.agc,
+            fused = fused,
+            chip = chip,
+            chipAccuracyM = s.chipFix?.accuracyM?.toDouble(),
+            gnssMinusElapsedMs = gnssMs?.let { it - fix.elapsedRealtimeMs },
+            gnssMinusNetworkMs = network,
+            gnssMinusWallMs = gnssMs?.let { it - (System.currentTimeMillis() - ageMs) },
+        )
+    }
+
     /** TPS's super position as a [Fix], for the screen. */
     private fun fusedToFix(f: FusedFix, clock: RawClock, chip: Fix?): Fix {
-        val leap = clock.leapSecond ?: org.soulstone.tps.raw.Pseudoranges.DEFAULT_LEAP_SECONDS
-        val gpsNs = clock.fullBiasNanos?.let { clock.timeNanos - it - Math.round(clock.biasNanos) }
-        val gnssMs = gpsNs?.let { it / 1_000_000 + GPS_EPOCH_UNIX_MS - leap * 1_000L }
+        val gnssMs = gnssUtcMs(clock)
         val elapsedNs = clock.elapsedRealtimeNanos ?: SystemClock.elapsedRealtimeNanos()
         val wallAtFix = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() - elapsedNs) / 1_000_000
         // Height above sea level: the geoid's height under the chip's fix is the same a few metres away.

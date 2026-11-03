@@ -48,7 +48,20 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   second keep it going; Doppler for velocity; and each measurement checked against the
   filter's expectation and left out if it doesn't fit. On a test recording it stayed
   within 3 m of the chip's fix typically and 8 m 95% of the time, where TPS's per-second
-  fixes wandered 18 m and 79 m. It needs raw measurements and orbits (below).
+  fixes wandered 18 m and 79 m. It needs raw measurements and orbits (below). It takes
+  over only once settled (10 seconds, ±15 m or better), holds its position through up to
+  30 s of lost or jammed signal (saying so), and starts from the chip's fix when there is one.
+- **Integrity warnings**: a triangle with `!` on the sky circle, orange for a caution and
+  red for an alert, when TPS sees signs of **jamming or spoofing**, with a line saying what
+  and the full list in the INTEGRITY card. It checks whether one system disagrees with the
+  others (a fake GPS signal is the classic attack; TPS keeps to the honest systems), whether
+  the position jumps faster than anything on the ground, whether GNSS time jumps against
+  the phone's steady clock or sits far from Android's network time, whether every signal
+  drops at once (jamming, or a blocked sky: without the chip's AGC a phone can't tell them
+  apart) or gets stronger at once, whether all signals arrive at the same strength, whether
+  the receiver gain falls (where the chip reports it), whether the clock jumps, whether the
+  measurements fit together, and whether TPS and the chip agree. A phone can't prove an
+  attack, and a careful spoofer that fakes every system consistently can pass every check.
 - **Fix line**: 2D or 3D, satellites used out of those in view, time to first fix, HDOP,
   and whether the fix uses two frequencies.
 - **Satellite time**: the time from GNSS, in your time zone and in UTC, and how far off

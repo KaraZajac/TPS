@@ -1,6 +1,7 @@
 package org.soulstone.tps.raw
 
 import java.io.File
+import kotlin.math.abs
 import kotlin.math.hypot
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -20,7 +21,9 @@ import org.soulstone.tps.gnss.SkySnapshot
  */
 class RecordingReplayTest {
 
-    private class Moment(val epoch: RawEpoch, val utcMs: Long)
+    private class Moment(val epoch: RawEpoch, val utcMs: Long, val elapsedMs: Long?, val wallMs: Long?)
+
+    private class ChipFix(val utcMs: Long, val at: Geodetic, val accuracyM: Double?, val elapsedMs: Long?)
 
     private fun columns(header: String) = header.removePrefix("# ").split(",").drop(1).withIndex().associate { it.value to it.index }
 
@@ -32,7 +35,7 @@ class RecordingReplayTest {
         val headers = HashMap<String, Map<String, Int>>()
         val raw = LinkedHashMap<Long, MutableList<List<String>>>()
         val pvt = HashMap<Triple<Long, Int, Int>, List<String>>()
-        val fixes = ArrayList<Pair<Long, Geodetic>>()
+        val fixes = ArrayList<ChipFix>()
         val status = sortedMapOf<Long, MutableList<List<String>>>()
         File(path).forEachLine { line ->
             if (line.startsWith("# ")) {
@@ -49,10 +52,15 @@ class RecordingReplayTest {
                 }
                 // The chip's fixes only; "TPS" lines are TPS's own from the phone.
                 "Fix" -> headers.getValue("Fix").takeIf { h -> values[h.getValue("Provider")] == "GPS" }?.let { h ->
-                    fixes += values[h.getValue("UnixTimeMillis")].toLong() to Geodetic(
-                        values[h.getValue("LatitudeDegrees")].toDouble(),
-                        values[h.getValue("LongitudeDegrees")].toDouble(),
-                        values[h.getValue("AltitudeMeters")].toDoubleOrNull() ?: 0.0,
+                    fixes += ChipFix(
+                        values[h.getValue("UnixTimeMillis")].toLong(),
+                        Geodetic(
+                            values[h.getValue("LatitudeDegrees")].toDouble(),
+                            values[h.getValue("LongitudeDegrees")].toDouble(),
+                            values[h.getValue("AltitudeMeters")].toDoubleOrNull() ?: 0.0,
+                        ),
+                        values[h.getValue("AccuracyMeters")].toDoubleOrNull(),
+                        values[h.getValue("elapsedRealtimeNanos")].toLongOrNull()?.div(1_000_000),
                     )
                 }
                 "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
@@ -106,7 +114,11 @@ class RecordingReplayTest {
             }
             val gpsNs = clock.fullBiasNanos?.let { timeNanos - it - Math.round(clock.biasNanos) } ?: 0L
             val utcMs = gpsNs / 1_000_000 + 315_964_800_000L - (clock.leapSecond ?: 18) * 1000L
-            Moment(RawEpoch(clock, measurements), utcMs)
+            Moment(
+                RawEpoch(clock, measurements), utcMs,
+                elapsedMs = r0[rh.getValue("ChipsetElapsedRealtimeNanos")].toLongOrNull()?.div(1_000_000),
+                wallMs = r0[rh.getValue("utcTimeMillis")].toLongOrNull(),
+            )
         }
 
         val engine = OwnFixEngine()
@@ -114,10 +126,19 @@ class RecordingReplayTest {
         val snapshot = ArrayList<Double>()
         var usable = 0
         var rejected = 0
+        val vertical = ArrayList<Double>()
+        val climb = ArrayList<Double>()
+        val claimed = ArrayList<Double>()
+        val nis = ArrayList<Double>()
+        val monitor = IntegrityMonitor()
+        val findings = LinkedHashSet<String>()
+        var worst = Severity.OK
         for (m in moments) {
-            val chip = fixes.minByOrNull { kotlin.math.abs(it.first - m.utcMs) }?.takeIf { kotlin.math.abs(it.first - m.utcMs) <= 600 }?.second ?: continue
+            val nearest = fixes.minByOrNull { kotlin.math.abs(it.utcMs - m.utcMs) }?.takeIf { kotlin.math.abs(it.utcMs - m.utcMs) <= 600 }
+            val chip = nearest?.at
+            val statusRows = status.headMap(m.utcMs + 1).entries.lastOrNull()?.value
             // The chip's sky at that moment, for the orbit check.
-            val sky = status.headMap(m.utcMs + 1).entries.lastOrNull()?.value?.let { rows ->
+            val sky = statusRows?.let { rows ->
                 SkySnapshot.of(rows.map { v ->
                     Signal(
                         Constellation.fromAndroid(v[sh.getValue("ConstellationType")].toInt()), v[sh.getValue("Svid")].toInt(),
@@ -126,13 +147,40 @@ class RecordingReplayTest {
                     )
                 })
             }
-            val report = engine.solve(m.epoch, chip, sky)
-            report.combined?.let { snapshot += Solver.offset(chip, it.ecef).let { e -> hypot(e[0], e[1]) } }
+            val report = engine.solve(m.epoch, chip, sky, nearest?.accuracyM)
+            if (chip != null) report.combined?.let { snapshot += Solver.offset(chip, it.ecef).let { e -> hypot(e[0], e[1]) } }
+            // The integrity checks, fed as the app feeds them.
+            val integrity = monitor.update(
+                IntegrityInput(
+                    elapsedS = (m.elapsedMs ?: (m.epoch.clock.timeNanos / 1_000_000)) / 1_000.0,
+                    signals = statusRows.orEmpty().map { v ->
+                        SignalLevel(
+                            Constellation.fromAndroid(v[sh.getValue("ConstellationType")].toInt()), v[sh.getValue("Svid")].toInt(),
+                            v[sh.getValue("Cn0DbHz")].toDouble(), v[sh.getValue("ElevationDegrees")].toDouble(),
+                        )
+                    }.filter { it.cn0DbHz > 0 },
+                    fused = report.fused,
+                    chip = chip,
+                    chipAccuracyM = nearest?.accuracyM,
+                    // Time from the chip's fix, as the app does.
+                    gnssMinusElapsedMs = nearest?.elapsedMs?.let { nearest.utcMs - it },
+                    gnssMinusWallMs = nearest?.elapsedMs?.let { fe ->
+                        m.wallMs?.let { w -> m.elapsedMs?.let { re -> nearest.utcMs - (fe + (w - re)) } }
+                    },
+                )
+            )
+            if (integrity.level > worst) worst = integrity.level
+            integrity.checks.filter { it.severity != Severity.OK }.forEach { findings += "${it.severity} ${it.check.title}: ${it.text}" }
             val f = report.fused ?: continue
             rejected += f.rejected
-            if (f.usable) {
+            if (f.usable && chip != null) {
                 usable++
-                fused += Solver.offset(chip, f.ecef).let { e -> hypot(e[0], e[1]) }
+                val e = Solver.offset(chip, f.ecef)
+                fused += hypot(e[0], e[1])
+                vertical += e[2]
+                climb += abs(f.velocityUp)
+                claimed += f.horizontalAccuracyM
+                f.rangeNis?.let { nis += it }
             }
         }
         fun stats(v: List<Double>): String {
@@ -143,6 +191,17 @@ class RecordingReplayTest {
         println("rounds ${moments.size}, super position usable in $usable, measurements rejected $rejected")
         println("snapshot, all systems: " + stats(snapshot))
         println("super position:        " + stats(fused))
+        println("height, TPS minus chip: " + vertical.sorted().let { v -> if (v.isEmpty()) "none" else "median %+.1f m, range %+.1f to %+.1f m".format(v[v.size / 2], v.first(), v.last()) })
+        println("vertical speed (should be ~0 standing): " + stats(climb).replace(" m,", " m/s,").replace(" m (", " m/s ("))
+        println("integrity: worst $worst" + findings.joinToString("") { "\n  $it" })
+        println("claimed accuracy: " + stats(claimed) + "; consistency (NIS, ~1 when the noise model is right): " +
+            nis.sorted().let { v -> if (v.isEmpty()) "none" else "median %.2f, mean %.2f".format(v[v.size / 2], v.average()) })
+        // A normal outing: no warning should have shown.
+        assertTrue("false alarm: $findings", worst == Severity.OK)
+        if (ph == null || fixes.isEmpty()) {
+            println("(no SatPvt or Fix lines: TPS's own position can't be checked on this one)")
+            return
+        }
         assertTrue("usable in only $usable of ${moments.size} rounds", usable >= moments.size * 0.8)
         val sorted = fused.sorted()
         assertTrue("median ${sorted[sorted.size / 2]} m", sorted[sorted.size / 2] < 6.0)

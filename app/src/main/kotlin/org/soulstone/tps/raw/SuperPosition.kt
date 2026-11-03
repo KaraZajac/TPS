@@ -33,6 +33,24 @@ data class FusedFix(
     val sinceUpdateS: Double,
     /** Measurement updates since the filter (re)started. */
     val updates: Int,
+    /** Shown as the position: settled to begin with, then held through short losses. */
+    val usable: Boolean,
+    /** This round's pseudoranges that fitted, and that didn't, per system. */
+    val acceptedBySystem: Map<Constellation, Int> = emptyMap(),
+    val rejectedBySystem: Map<Constellation, Int> = emptyMap(),
+    /** Jumps of the whole clock taken up (no hardware reset reported), and the latest one's size, metres. */
+    val clockJumps: Int = 0,
+    val lastClockJumpM: Double = 0.0,
+    /** Restarts from a fresh snapshot fix; for the latest, how far the position moved and after how long without data. */
+    val restarts: Int = 0,
+    val lastRestartMoveM: Double? = null,
+    val lastRestartGapS: Double? = null,
+    /**
+     * How surprised the filter was by this round's pseudoranges: the mean of innovation² over
+     * its expected variance. About 1 when its noise model is right; well below 1 means its ±
+     * is too pessimistic, well above too optimistic.
+     */
+    val rangeNis: Double? = null,
 ) {
     val speedMps: Double get() = sqrt(velocityEast * velocityEast + velocityNorth * velocityNorth)
 
@@ -40,14 +58,17 @@ data class FusedFix(
     val bearingDeg: Double?
         get() = if (speedMps < MOVING_MPS) null else (Math.toDegrees(atan2(velocityEast, velocityNorth)) + 360) % 360
 
-    /** Settled and current enough to show as the position. */
-    val usable: Boolean get() = updates >= MIN_UPDATES && sinceUpdateS <= MAX_COAST_S && horizontalAccuracyM <= MAX_SHOWN_ACCURACY_M
+    /** Holding a predicted position: no measurement fitted for a while (jamming, a tunnel). */
+    val holding: Boolean get() = sinceUpdateS > 2.5
 
     companion object {
         const val MOVING_MPS = 0.5
-        const val MIN_UPDATES = 3
-        const val MAX_COAST_S = 5.0
-        const val MAX_SHOWN_ACCURACY_M = 100.0
+        /** To be shown at first: this many updates, and this accurate. */
+        const val SETTLE_UPDATES = 10
+        const val SETTLE_ACCURACY_M = 15.0
+        /** Once shown: held this long without measurements, while it stays this accurate. */
+        const val HOLD_S = 30.0
+        const val HOLD_ACCURACY_M = 50.0
     }
 }
 
@@ -85,61 +106,172 @@ class SuperPosition {
     private var lastSystems = emptySet<Constellation>()
     private var lastRejected = 0
     private var smoothedSpeed = 0.0
+    private var trusted = false
+    private var startedFromChip = false
+    private var hadState = false
+    private var clockJumps = 0
+    private var lastClockJumpM = 0.0
+    private var restarts = 0
+    private var lastRestartMoveM: Double? = null
+    private var lastRestartGapS: Double? = null
+    private var acceptedBySystem = emptyMap<Constellation, Int>()
+    private var rejectedBySystem = emptyMap<Constellation, Int>()
+    private var rangeNis: Double? = null
 
     fun reset() {
         initialized = false
+        hadState = false
     }
 
     /**
-     * One round of measurements. [start] is a rough position to begin from (the chip's fix);
-     * it only matters for the very first snapshot. Returns the filter's position, or null
-     * while it has none yet.
+     * One round of measurements. [start] is a position to begin from. With [startAccuracyM]
+     * (the chip's fix and its 68% radius), the filter starts there: from weak signals a
+     * one-second snapshot can be 50 m off sideways and 100 m in height, and the chip has had
+     * longer. Without, [start] only guides the first snapshot. Returns the filter's position,
+     * or null while it has none yet.
      */
-    fun step(clock: RawClock, observations: List<Observation>, start: Ecef?, klobuchar: Klobuchar?, gpsSeconds: Double): FusedFix? {
-        val fullBias = clock.fullBiasNanos ?: return output()
+    fun step(
+        clock: RawClock, observations: List<Observation>, start: Ecef?, klobuchar: Klobuchar?, gpsSeconds: Double,
+        startAccuracyM: Double? = null,
+    ): FusedFix? {
+        val fullBias = clock.fullBiasNanos
         val t = clock.timeNanos * 1e-9
-        val restart = !initialized || clock.discontinuityCount != discontinuity || t < lastT || t - lastT > MAX_GAP_S
-        if (restart) {
-            initialized = initialize(t, clock, fullBias, observations, start, klobuchar, gpsSeconds)
+        if (initialized && (t < lastT || t - lastT > MAX_GAP_S)) initialized = false
+        // Started cold from a snapshot, and the chip now has a decent fix: start again from that,
+        // once, before anything was shown. Not a restart: no position of TPS's was ever on screen.
+        if (initialized && !trusted && !startedFromChip && fullBias != null && start != null &&
+            startAccuracyM != null && startAccuracyM <= LATE_START_ACCURACY_M
+        ) {
+            initialized = initialize(t, clock, fullBias, observations, start, klobuchar, gpsSeconds, startAccuracyM)
+            return output()
+        }
+        if (!initialized) {
+            if (fullBias == null) return null
+            // Only a restart after TPS's position was on screen can show as a jump.
+            val previous = if (hadState && trusted) Ecef(x[0], x[1], x[2]) else null
+            val gap = t - lastUpdateT
+            initialized = initialize(t, clock, fullBias, observations, start, klobuchar, gpsSeconds, startAccuracyM)
+            if (initialized && previous != null) {
+                restarts++
+                lastRestartMoveM = (Ecef(x[0], x[1], x[2]) - previous).norm()
+                lastRestartGapS = gap
+            }
+            hadState = hadState || initialized
             return output()
         }
         predict(t)
-        // The chip's correction of its own clock since the reference, put back into the pseudoranges.
-        val steer = ((fullBias - refFullBias) + (clock.biasNanos - refBias)) * 1e-9 * Pseudoranges.C
-        update(t, observations, steer, klobuchar, gpsSeconds)
-        if (x.any { it.isNaN() || it.isInfinite() }) initialized = false
+        if (fullBias != null) {
+            // A hardware clock reset: the clock starts over, the position and velocity don't.
+            if (clock.discontinuityCount != discontinuity) resetClock(clock, fullBias)
+            // The chip's correction of its own clock since the reference, put back into the pseudoranges.
+            val steer = ((fullBias - refFullBias) + (clock.biasNanos - refBias)) * 1e-9 * Pseudoranges.C
+            update(t, observations, steer, klobuchar, gpsSeconds)
+        }
+        if (x.any { it.isNaN() || it.isInfinite() }) {
+            initialized = false
+            hadState = false
+        }
         return output()
+    }
+
+    /**
+     * The receiver clock (per system, unless [oneClock]) that best fits the pseudoranges if the
+     * receiver is at [at]: the median of what's left after range, satellite clock and delays.
+     */
+    private fun clocksAt(at: Ecef, obs: List<Observation>, klobuchar: Klobuchar?, gpsSeconds: Double, oneClock: Boolean): Map<Constellation, Double>? {
+        val geo = Geo.toGeodetic(at)
+        val residuals = obs.mapNotNull { o ->
+            val (az, el) = Geo.azEl(geo, at, o.satellite)
+            if (Math.toDegrees(el) < MASK_DEG) return@mapNotNull null
+            val range = (o.satellite - at).norm() + OMEGA_E * (o.satellite.x * at.y - o.satellite.y * at.x) / Pseudoranges.C
+            val scale = o.carrierHz?.let { (L1 / it) * (L1 / it) } ?: 1.0
+            val iono = o.ionoMeters ?: ((klobuchar?.let { Atmosphere.klobuchar(it, geo, az, el, gpsSeconds) } ?: 0.0) * scale)
+            val tropo = o.tropoMeters ?: Atmosphere.troposphere(geo, el)
+            o.constellation to (o.pseudorange - (range - Pseudoranges.C * o.satelliteClock + iono + tropo))
+        }
+        if (residuals.size < 3) return null
+        fun median(v: List<Double>) = v.sorted()[v.size / 2]
+        if (oneClock) {
+            val b = median(residuals.map { it.second })
+            return residuals.map { it.first }.distinct().associateWith { b }
+        }
+        val clocks = residuals.groupBy({ it.first }, { it.second }).mapValues { median(it.value) }
+        return clocks.takeIf { reference in it }
+    }
+
+    private fun resetClock(clock: RawClock, fullBias: Long) {
+        refFullBias = fullBias
+        refBias = clock.biasNanos
+        discontinuity = clock.discontinuityCount
+        x[CLOCK] = 0.0
+        for (i in 0 until N) {
+            p[CLOCK][i] = 0.0
+            p[i][CLOCK] = 0.0
+        }
+        p[CLOCK][CLOCK] = 1.0e5 * 1.0e5
+        p[DRIFT][DRIFT] += 100.0 * 100.0
     }
 
     // ------------------------------------------------------------------ start
 
     private fun initialize(
         t: Double, clock: RawClock, fullBias: Long, obs: List<Observation>, start: Ecef?, klobuchar: Klobuchar?, gpsSeconds: Double,
+        startAccuracyM: Double?,
     ): Boolean {
         // The chip's inter-system biases first: with them every system shares one clock.
         val corrected = obs.filter { it.constellation in SYSTEMS }.map { it.copy(pseudorange = it.pseudorange - (it.isbMeters ?: 0.0)) }
         val bySystem = corrected.groupBy { it.constellation }
-        val solution = Solver.solve(corrected, start, klobuchar, gpsSeconds)
+        val chipBiases = corrected.isNotEmpty() && corrected.all { it.isbMeters != null }
+        reference = if (Constellation.GPS in bySystem) Constellation.GPS else bySystem.keys.maxByOrNull { bySystem[it]?.size ?: 0 } ?: Constellation.GPS
+        // With every offset known, solve with one clock: a clock per system from a weak snapshot
+        // comes out tens of metres wrong, and the filter would hold on to it.
+        val single = if (chipBiases) Solver.solve(corrected.map { it.copy(constellation = reference) }, start, klobuchar, gpsSeconds) else null
+        val solution = single
+            ?: Solver.solve(corrected, start, klobuchar, gpsSeconds)
             ?: Solver.solve(corrected.filter { (bySystem[it.constellation]?.size ?: 0) >= 2 }, start, klobuchar, gpsSeconds)
             ?: bySystem.values.maxByOrNull { it.size }?.let { Solver.solve(it, start, klobuchar, gpsSeconds) }
             ?: return false
-        reference = if (Constellation.GPS in solution.clocks) Constellation.GPS else solution.clocks.keys.maxBy { bySystem[it]?.size ?: 0 }
+        if (single == null) {
+            reference = if (Constellation.GPS in solution.clocks) Constellation.GPS else solution.clocks.keys.maxBy { bySystem[it]?.size ?: 0 }
+        }
         x.fill(0.0)
         for (row in p) row.fill(0.0)
-        x[0] = solution.ecef.x; x[1] = solution.ecef.y; x[2] = solution.ecef.z
-        x[CLOCK] = solution.clocks.getValue(reference)
-        for (i in 0 until 3) p[i][i] = 30.0 * 30.0
-        for (i in 3 until 6) p[i][i] = 10.0 * 10.0
+        // From the chip's fix when there is one, with the clock that fits there; else the snapshot.
+        val fromChip = if (start != null && startAccuracyM != null) clocksAt(start, corrected, klobuchar, gpsSeconds, chipBiases) else null
+        val origin = if (fromChip != null) start!! else solution.ecef
+        startedFromChip = fromChip != null
+        x[0] = origin.x; x[1] = origin.y; x[2] = origin.z
+        x[CLOCK] = fromChip?.get(reference) ?: solution.clocks.getValue(reference)
+        val axes = localAxes(Geo.toGeodetic(origin))
+        val position = if (fromChip != null) {
+            val a = startAccuracyM!!.coerceIn(5.0, 50.0)
+            localCovariance(axes, (2 * a) * (2 * a), (4 * a) * (4 * a))
+        } else {
+            localCovariance(axes, 100.0 * 100.0, 100.0 * 100.0)
+        }
+        for (i in 0 until 3) for (j in 0 until 3) p[i][j] = position[i][j]
+        // Velocity: unknown along the ground, but nobody starts out climbing at 10 m/s.
+        val start = localCovariance(axes, 10.0 * 10.0, 1.0 * 1.0)
+        for (i in 0 until 3) for (j in 0 until 3) p[3 + i][3 + j] = start[i][j]
         p[CLOCK][CLOCK] = 30.0 * 30.0
         p[DRIFT][DRIFT] = 300.0 * 300.0
         for (c in SYSTEMS) {
             if (c == reference) continue
             val k = isbIndex(c)
-            val solved = solution.clocks[c]
             val chipKnows = obs.any { it.constellation == c && it.isbMeters != null }
-            x[k] = if (solved != null) solved - x[CLOCK] else 0.0
-            // Without the chip's figure, GLONASS can sit a kilometre off GPS.
-            p[k][k] = if (solved != null || chipKnows) 30.0 * 30.0 else 3_000.0 * 3_000.0
+            val solved = (if (fromChip != null) fromChip[c] else solution.clocks[c]?.takeIf { single == null })
+            x[k] = when {
+                // What's left after the chip's own figure: a few metres (6 m at most on Kara's phone).
+                chipKnows -> 0.0
+                solved != null -> solved - x[CLOCK]
+                else -> 0.0
+            }
+            p[k][k] = when {
+                chipKnows -> 10.0 * 10.0
+                solved != null -> 30.0 * 30.0
+                // Without the chip's figure, GLONASS can sit a kilometre off GPS.
+                else -> 3_000.0 * 3_000.0
+            }
         }
         refFullBias = fullBias
         refBias = clock.biasNanos
@@ -152,6 +284,9 @@ class SuperPosition {
         lastSystems = solution.clocks.keys
         lastRejected = 0
         smoothedSpeed = 0.0
+        trusted = false
+        acceptedBySystem = emptyMap()
+        rejectedBySystem = emptyMap()
         return true
     }
 
@@ -176,14 +311,18 @@ class SuperPosition {
         val dt3 = dt2 * dt
         // Horizontal speed only (the vertical velocity is poorly seen), smoothed over a few seconds
         // so one noisy round doesn't count as setting off.
-        val ground = Geo.enu(Geo.toGeodetic(Ecef(x[0], x[1], x[2])), Ecef(x[3], x[4], x[5]))
+        val geo = Geo.toGeodetic(Ecef(x[0], x[1], x[2]))
+        val ground = Geo.enu(geo, Ecef(x[3], x[4], x[5]))
         smoothedSpeed += (sqrt(ground[0] * ground[0] + ground[1] * ground[1]) - smoothedSpeed) * minOf(1.0, dt / SPEED_SMOOTHING_S)
         val accel = accelerationNoise(smoothedSpeed)
-        for (i in 0 until 3) {
-            p[i][i] += accel * dt3 / 3
-            p[i][3 + i] += accel * dt2 / 2
-            p[3 + i][i] += accel * dt2 / 2
-            p[3 + i][3 + i] += accel * dt
+        // People and cars turn and brake, but hardly ever accelerate up or down: far less
+        // freedom vertically, or a noisy vertical speed carries the height away.
+        val q = localCovariance(localAxes(geo), accel, accel * VERTICAL_SHARE)
+        for (i in 0 until 3) for (j in 0 until 3) {
+            p[i][j] += q[i][j] * dt3 / 3
+            p[i][3 + j] += q[i][j] * dt2 / 2
+            p[3 + i][j] += q[i][j] * dt2 / 2
+            p[3 + i][3 + j] += q[i][j] * dt
         }
         p[CLOCK][CLOCK] += CLOCK_PSD * dt + DRIFT_PSD * dt3 / 3
         p[CLOCK][DRIFT] += DRIFT_PSD * dt2 / 2
@@ -244,7 +383,10 @@ class SuperPosition {
 
         // A jump of the whole clock moves every pseudorange (or every rate) by the same amount:
         // take it up in the clock rather than reject every satellite.
-        absorbCommonJump(rows.filter { it.range }, CLOCK)
+        absorbCommonJump(rows.filter { it.range }, CLOCK)?.let { jump ->
+            clockJumps++
+            lastClockJumpM = jump
+        }
         absorbCommonJump(rows.filter { !it.range }, DRIFT)
 
         // Gate: a measurement far from what the filter expects is left out, not averaged in.
@@ -255,6 +397,11 @@ class SuperPosition {
         val ranges = rows.count { it.range }
         val rangesRejected = ranges - accepted.count { it.range }
         lastRejected = rows.size - accepted.size
+        val acceptedSet = accepted.toHashSet()
+        rangeNis = accepted.filter { it.range }.map { it.innovation * it.innovation / (quadratic(it.h) + it.variance) }
+            .takeIf { it.isNotEmpty() }?.average()
+        acceptedBySystem = rows.filter { it.range && it in acceptedSet }.groupingBy { it.satellite.constellation }.eachCount()
+        rejectedBySystem = rows.filter { it.range && it !in acceptedSet }.groupingBy { it.satellite.constellation }.eachCount()
         badRounds = if (ranges >= 4 && rangesRejected * 2 > ranges) badRounds + 1 else 0
         if (badRounds >= MAX_BAD_ROUNDS) {
             // Most satellites disagree with the filter for several rounds: start over.
@@ -285,9 +432,9 @@ class SuperPosition {
         updates++
     }
 
-    /** If [rows] all share one large offset, moves state [index] by it (the clock or its drift jumped). */
-    private fun absorbCommonJump(rows: List<Row>, index: Int) {
-        if (rows.size < 3) return
+    /** If [rows] all share one large offset, moves state [index] by it (the clock or its drift jumped) and returns it. */
+    private fun absorbCommonJump(rows: List<Row>, index: Int): Double? {
+        if (rows.size < 3) return null
         val sorted = rows.map { it.innovation }.sorted()
         val median = sorted[sorted.size / 2]
         val spread = sorted.map { abs(it - median) }.sorted()[sorted.size / 2]
@@ -296,8 +443,27 @@ class SuperPosition {
             x[index] += median
             p[index][index] += median * median
             for (row in rows) row.innovation -= median
+            return median
         }
+        return null
     }
+
+    /** East, north and up unit vectors at [g], in Earth-fixed coordinates. */
+    private fun localAxes(g: Geodetic): Array<DoubleArray> {
+        val lat = Math.toRadians(g.latitude)
+        val lon = Math.toRadians(g.longitude)
+        return arrayOf(
+            doubleArrayOf(-sin(lon), cos(lon), 0.0),
+            doubleArrayOf(-sin(lat) * cos(lon), -sin(lat) * sin(lon), cos(lat)),
+            doubleArrayOf(cos(lat) * cos(lon), cos(lat) * sin(lon), sin(lat)),
+        )
+    }
+
+    /** An Earth-fixed 3×3 covariance with [horizontal] along the ground and [vertical] up. */
+    private fun localCovariance(axes: Array<DoubleArray>, horizontal: Double, vertical: Double): Array<DoubleArray> =
+        Array(3) { i ->
+            DoubleArray(3) { j -> horizontal * (axes[0][i] * axes[0][j] + axes[1][i] * axes[1][j]) + vertical * axes[2][i] * axes[2][j] }
+        }
 
     /**
      * Standing still, the position is held tightly and averages down; walking, it may turn and
@@ -324,7 +490,8 @@ class SuperPosition {
         val weak = o.cn0DbHz?.let { Math.pow(10.0, max(0.0, WEAK_CN0 - it) / 20) } ?: 1.0
         // GLONASS: each satellite on its own frequency, with its own small receiver bias.
         val glonass = if (o.constellation == Constellation.GLONASS) 1.5 else 1.0
-        return base * weak * glonass
+        // Calibrated on Kara's recordings: at this scale the innovations' NIS averages ~1.
+        return base * weak * glonass * RANGE_SIGMA_SCALE
     }
 
     // ------------------------------------------------------------------ out
@@ -344,13 +511,20 @@ class SuperPosition {
             for (i in 0 until 3) for (j in 0 until 3) s += a[i] * p[i][j] * a[j]
             return max(s, 0.0)
         }
+        val horizontal = sqrt(variance(east) + variance(north))
+        val since = lastT - lastUpdateT
+        trusted = if (!trusted) {
+            updates >= FusedFix.SETTLE_UPDATES && horizontal <= FusedFix.SETTLE_ACCURACY_M && since <= 2.5
+        } else {
+            since <= FusedFix.HOLD_S && horizontal <= FusedFix.HOLD_ACCURACY_M
+        }
         return FusedFix(
             position = geo,
             ecef = ecef,
             velocityEast = v[0],
             velocityNorth = v[1],
             velocityUp = v[2],
-            horizontalAccuracyM = sqrt(variance(east) + variance(north)),
+            horizontalAccuracyM = horizontal,
             verticalAccuracyM = sqrt(variance(up)),
             satellites = lastSatellites,
             systems = lastSystems,
@@ -359,8 +533,17 @@ class SuperPosition {
             interSystemBiases = SYSTEMS.filter { it != reference && p[isbIndex(it)][isbIndex(it)] < 1_000.0 * 1_000.0 }
                 .associateWith { x[isbIndex(it)] },
             clockDriftMps = x[DRIFT],
-            sinceUpdateS = lastT - lastUpdateT,
+            sinceUpdateS = since,
             updates = updates,
+            usable = trusted,
+            acceptedBySystem = acceptedBySystem,
+            rejectedBySystem = rejectedBySystem,
+            clockJumps = clockJumps,
+            lastClockJumpM = lastClockJumpM,
+            restarts = restarts,
+            lastRestartMoveM = lastRestartMoveM,
+            lastRestartGapS = lastRestartGapS,
+            rangeNis = rangeNis,
         )
     }
 
@@ -390,11 +573,16 @@ class SuperPosition {
         private const val STILL_MPS = 0.7
         private const val WALKING_MPS = 3.5
         private const val SPEED_SMOOTHING_S = 3.0
+        /** Vertical acceleration noise as a share of the horizontal. */
+        private const val VERTICAL_SHARE = 0.05
         private const val CLOCK_PSD = 1.0
         private const val DRIFT_PSD = 0.1
         private const val ISB_PSD = 0.01
 
         private const val MIN_RATE_SIGMA = 0.3
+        private const val RANGE_SIGMA_SCALE = 0.6
+        /** A cold start from a snapshot is redone from the chip's fix once the chip is this sure. */
+        private const val LATE_START_ACCURACY_M = 20.0
         private const val WEAK_CN0 = 30.0
         /** 5σ, squared. */
         private const val GATE = 25.0

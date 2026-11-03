@@ -32,6 +32,7 @@ TPS makes that visible. It fits the TERRAN idea of "one people without nations".
 | 9 | **Waypoints button** | A **star**. **Add where I am** asks for a label in a dialog. |
 | 10 | **Orbits on phones without navigation messages** | The **chip's own satellite positions** (`SatellitePvt`), read from each measurement's public serialized form (§8). Chosen by Kara after the CHIP card showed their phone sends raw measurements but no navigation messages. The alternative, importing a daily orbit file downloaded in the browser, stays possible later. |
 | 11 | **The position on the main screen** | **TPS's own super position** (§8) when it has a current one, the chip's otherwise, labelled `TPS` or `chip`. Chosen by Kara after a prototype on their recording stayed within ~3 m of the chip's fix. |
+| 12 | **Jamming and spoofing warnings** | A **triangle with `!`** on the sky circle (orange: caution, red: alert), a line under the fix, and an INTEGRITY card with every check (§8). Kara's request. |
 
 ## 2. What the research found
 
@@ -483,11 +484,41 @@ rotation during the signal's flight, Klobuchar ionosphere (from GPS subframe 4),
 standard troposphere, a 10° mask, C/N0 weights. At least 4 satellites per constellation.
 Results: position, offset from the chip's fix (east/north/up), residuals, DOP.
 
-**Integrity (v0.4).** Flags, each with what it can and can't tell you: own fixes far from
-the chip's (beyond their combined uncertainty); constellations disagreeing with each
-other; AGC dropping (API 33) with C/N0 rising or flattening across satellites; GNSS time
-against the phone's network time; jumps in position or clock. Phones are not survey
-receivers: this catches crude spoofing and jamming, not a careful attacker.
+**Robustness (0.3.0-dev.5)**, from Kara's recordings: far less vertical than horizontal
+motion noise (5%), so a noisy vertical speed can't carry the height away (it had shown
+"−30 m MSL"); a cold start from a snapshot is redone from the chip's fix once the chip is
+within 20 m (weak-signal snapshots were 50–80 m off sideways and 100–145 m in height); with
+the chip's inter-system biases the start uses one clock and the leftover offsets begin at 0;
+pseudorange noise calibrated so the innovations' NIS averages ~1 (it was 0.35: TPS had been
+claiming ±6–9 m when its spread said ±4–5); shown only once settled (10 updates, ±15 m),
+then held through up to 30 s without measurements (±50 m); a hardware clock reset re-learns
+the clock without losing the position. Replays: 3.9 / 2.5 / 5.4 m typical from the chip's
+fix on three recordings, 95% within 7.7 / 7.2 / 9.7 m, no false alarms. Height is the weak
+part: 3–26 m from the chip's.
+
+**Integrity (0.3.0-dev.5).** `IntegrityMonitor`, each check worded with what else it could
+be, findings held 20 s (caution) or 30 s (alert) after their cause:
+- *systems agree* (alert): one system's pseudoranges mostly rejected by the super position
+  for 3 rounds while others give at least 4: a fake signal for one system;
+- *position jumps* (alert): a restart moving TPS's shown position more than 200 m + 50 m/s ×
+  the gap, or the chip's fix jumping more than 500 m + 50 m/s × the gap;
+- *GNSS time* (alert): the chip's fix time against the phone's monotonic clock moving more
+  than 0.5 s (it holds to ~15 ms on Kara's phone), or more than 5 s off Android's network
+  time (API 33); caution beyond 60 s off the wall clock;
+- *signal strength*: every system's C/N0 down 10 dB at once (or half the satellites lost)
+  for 3 rounds: caution, jamming or a blocked sky; alert when the AGC fell too; every
+  signal up 6 dB at once: caution, overpowering transmitter;
+- *receiver gain* (API 33, when reported): down 6 dB from its baseline;
+- *signal pattern*: 8+ signals within ±2 dB for 10 rounds, or a median above 48 dB-Hz;
+- *receiver clock*: a common jump of every pseudorange without a reported reset;
+- *measurements fit*: 30% of pseudoranges rejected for 5 rounds;
+- *TPS vs chip*: further apart than 50 m and four times their combined accuracy for 5 rounds.
+Checked against staged attacks on a synthetic sky (`IntegrityTest`: a fake GPS signal is
+caught within 2 s and TPS stays with Galileo and GLONASS; a whole-sky takeover shows as a
+5 km jump; a 3 s time shift, jamming with and without AGC, an overpowering or one-antenna
+transmitter, a clock jump; a clean sky stays quiet) and on Kara's recordings (no false
+alarms). Phones are not survey receivers: this catches crude spoofing and jamming, not a
+careful attacker.
 
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;

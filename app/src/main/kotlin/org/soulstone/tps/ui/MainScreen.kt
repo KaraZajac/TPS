@@ -1,5 +1,7 @@
 package org.soulstone.tps.ui
 
+import org.soulstone.tps.raw.Severity
+import org.soulstone.tps.raw.IntegrityReport
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -170,6 +172,10 @@ fun MainScreen(
                         modifier = Modifier.fillMaxSize()
                     )
                     if (state.wanted && state.demo) DemoBadge(Modifier.align(Alignment.TopStart))
+                    // A triangle with "!" when TPS sees signs of jamming or spoofing.
+                    state.integrity?.takeIf { state.running && it.level != Severity.OK }?.let { report ->
+                        IntegrityBadge(report, Modifier.align(Alignment.TopEnd)) { showSheet = true }
+                    }
                 }
                 Spacer(Modifier.height(6.dp))
                 Legend(state, prefs.shapes)
@@ -190,6 +196,10 @@ fun MainScreen(
                 PositionReadout(state, prefs)
                 Spacer(Modifier.height(14.dp))
                 FixSummary(state)
+                state.integrity?.takeIf { state.running && it.level != Severity.OK }?.let { report ->
+                    Spacer(Modifier.height(10.dp))
+                    IntegrityLine(report) { showSheet = true }
+                }
                 if (fix != null) {
                     Spacer(Modifier.height(14.dp))
                     SatelliteClock(fix)
@@ -261,6 +271,50 @@ private fun Header(onOpenWaypoints: () -> Unit, onOpenSettings: () -> Unit) {
                 tint = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
+    }
+}
+
+private fun integrityColor(level: Severity) = if (level == Severity.ALERT) FixColors.Red else FixColors.Orange
+
+@Composable
+private fun IntegrityBadge(report: IntegrityReport, modifier: Modifier, onClick: () -> Unit) {
+    val headline = report.headline
+    Icon(
+        painter = painterResource(R.drawable.ic_warning),
+        contentDescription = "${headline?.threat?.label ?: "Warning"}: ${headline?.text.orEmpty()} Tap for details.",
+        tint = integrityColor(report.level),
+        modifier = modifier
+            .size(40.dp)
+            .clickable(onClick = onClick)
+    )
+}
+
+/** What TPS suspects, in one sentence under the fix line. */
+@Composable
+private fun IntegrityLine(report: IntegrityReport, onClick: () -> Unit) {
+    val headline = report.headline ?: return
+    val color = integrityColor(report.level)
+    Row(
+        verticalAlignment = Alignment.Top,
+        modifier = Modifier
+            .padding(horizontal = 16.dp)
+            .clickable(onClick = onClick)
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_warning),
+            contentDescription = null,
+            tint = color,
+            modifier = Modifier
+                .padding(top = 2.dp)
+                .size(14.dp)
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "${headline.threat?.label ?: "warning"}: ${headline.text}",
+            color = color,
+            fontSize = 12.sp,
+            fontFamily = KibernetykMono
+        )
     }
 }
 
