@@ -38,12 +38,17 @@ import androidx.compose.ui.unit.sp
 import kotlin.math.roundToInt
 import org.soulstone.tps.gnss.Constellation
 import org.soulstone.tps.gnss.ConstellationSummary
+import org.soulstone.tps.gnss.FixSource
 import org.soulstone.tps.gnss.GnssEngine
 import org.soulstone.tps.gnss.MarkShape
 import org.soulstone.tps.gnss.MslSource
 import org.soulstone.tps.gnss.SatState
 import org.soulstone.tps.gnss.Satellite
+import org.soulstone.tps.nav.Geodesy
 import org.soulstone.tps.nav.Geohash
+import org.soulstone.tps.raw.Geo
+import org.soulstone.tps.raw.Geodetic
+import org.soulstone.tps.raw.Solver
 import org.soulstone.tps.ui.theme.color
 import org.soulstone.tps.ui.theme.ringColor
 import org.soulstone.tps.ui.theme.KibernetykMono
@@ -281,9 +286,17 @@ private fun PositionCard(state: GnssEngine.State, prefs: DisplayPrefs) {
             }
             Spacer(Modifier.height(6.dp))
             if (fix == null) {
-                Note(if (state.running) "no fix yet" else "press START to listen for satellites")
+                Note(if (state.running) "no fix yet" else "not listening")
                 return@Column
             }
+            KeyValue(
+                "source",
+                when {
+                    state.demo -> "demo sky"
+                    state.fixSource == FixSource.TPS -> "TPS: every satellite, one clock, filtered over time"
+                    else -> "the chip" + if (state.running) " (TPS's own isn't ready; see OWN FIXES)" else ""
+                }
+            )
             KeyValue("decimal", Format.latLonDecimal(fix.latitude, fix.longitude))
             KeyValue("DMS", Format.latLonDms(fix.latitude, fix.longitude))
             KeyValue("geohash", Geohash.encode(fix.latitude, fix.longitude, prefs.geohashPrecision.takeIf { it > 0 } ?: 9))
@@ -316,12 +329,27 @@ private fun PositionCard(state: GnssEngine.State, prefs: DisplayPrefs) {
             KeyValue(
                 "fix",
                 if (state.fixValid) {
-                    "${fixTypeText(state.fixType)} · ${state.sky.used} of ${state.sky.inView} satellites" +
-                        if (state.fixTypeFromChip) "" else " (2D/3D inferred)"
+                    val what = if (state.fixSource == FixSource.TPS) "TPS" else fixTypeText(state.fixType)
+                    "$what · ${state.usedSatellites} of ${state.sky.inView} satellites" +
+                        if (state.fixSource == FixSource.TPS || state.fixTypeFromChip) "" else " (2D/3D inferred)"
                 } else {
                     "lost ${Format.duration(state.fixAgeMs ?: 0)} ago"
                 }
             )
+            // With TPS's own position on show, the chip's is the comparison.
+            val chipFix = state.chipFix?.takeIf { state.fixSource == FixSource.TPS && state.chipFixValid }
+            if (chipFix != null) {
+                val d = Solver.offset(
+                    Geodetic(fix.latitude, fix.longitude, fix.altitudeM ?: 0.0),
+                    Geo.toEcef(Geodetic(chipFix.latitude, chipFix.longitude, chipFix.altitudeM ?: fix.altitudeM ?: 0.0)),
+                )
+                val bearing = (Math.toDegrees(kotlin.math.atan2(d[0], d[1])) + 360) % 360
+                KeyValue(
+                    "chip's fix",
+                    Format.distance(kotlin.math.hypot(d[0], d[1]), units) + " " + Geodesy.compassPoint(bearing) + " of TPS's" +
+                        (chipFix.accuracyM?.let { " · ±" + Format.distance(it.toDouble(), units) } ?: "")
+                )
+            }
             state.dop?.let { d ->
                 KeyValue(
                     "DOP",
@@ -333,7 +361,7 @@ private fun PositionCard(state: GnssEngine.State, prefs: DisplayPrefs) {
                 KeyValue(
                     "TTFF",
                     if (it.fromChip) Format.duration(it.millis) + " (chip)"
-                    else "first fix ${Format.duration(it.millis)} after START"
+                    else "first fix ${Format.duration(it.millis)}"
                 )
             }
             KeyValue("GNSS time", Format.utcTime(fix.gnssTimeMs))

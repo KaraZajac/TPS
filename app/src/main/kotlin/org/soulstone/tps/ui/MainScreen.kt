@@ -70,6 +70,7 @@ import org.soulstone.tps.gnss.Constellation
 import org.soulstone.tps.gnss.Fix
 import org.soulstone.tps.gnss.FixType
 import org.soulstone.tps.gnss.FrequencyMode
+import org.soulstone.tps.gnss.FixSource
 import org.soulstone.tps.gnss.GnssEngine
 import org.soulstone.tps.gnss.MarkShape
 import org.soulstone.tps.nav.Geodesy
@@ -333,7 +334,13 @@ private fun PositionReadout(state: GnssEngine.State, prefs: DisplayPrefs) {
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         val accuracy = fix?.accuracyM?.takeIf { state.fixValid }
-        ReadoutHeader("position", accuracy?.let { "±" + Format.distance(it.toDouble(), prefs.units) } ?: "")
+        // Whose position this is: TPS's own (the super position) or the chip's.
+        val title = when {
+            fix == null || state.demo -> "position"
+            state.fixSource == FixSource.TPS -> "position · TPS"
+            else -> "position · chip"
+        }
+        ReadoutHeader(title, accuracy?.let { "±" + Format.distance(it.toDouble(), prefs.units) } ?: "")
         Spacer(Modifier.height(6.dp))
         if (fix == null) {
             Text(
@@ -414,7 +421,8 @@ private fun FixSummary(state: GnssEngine.State) {
     if (!state.running) return
     val sky = state.sky
     val headline = if (state.fixValid) {
-        "${fixTypeText(state.fixType)} fix  •  ${sky.used} of ${sky.inView} sats"
+        val what = if (state.fixSource == FixSource.TPS) "TPS" else fixTypeText(state.fixType)
+        "$what fix  •  ${state.usedSatellites} of ${sky.inView} sats"
     } else {
         "searching  •  ${sky.inView} sats in view"
     }

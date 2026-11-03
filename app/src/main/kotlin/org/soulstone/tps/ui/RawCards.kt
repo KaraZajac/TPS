@@ -45,7 +45,9 @@ import org.soulstone.tps.gnss.MarkShape
 import org.soulstone.tps.nav.Geodesy
 import android.os.Build
 import org.soulstone.tps.raw.ChipInfo
+import org.soulstone.tps.raw.Ecef
 import org.soulstone.tps.raw.EphemerisSource
+import org.soulstone.tps.raw.FusedFix
 import org.soulstone.tps.raw.Geodetic
 import org.soulstone.tps.raw.NavType
 import org.soulstone.tps.raw.OwnFixReport
@@ -83,18 +85,52 @@ private class Offset3(val east: Double, val north: Double, val up: Double) {
     }
 }
 
-private fun offsetOf(chip: Geodetic?, s: Solution?): Offset3? {
-    if (chip == null || s == null) return null
-    val d = Solver.offset(chip, s.ecef)
+private fun offsetOf(chip: Geodetic?, s: Solution?): Offset3? = s?.let { offsetOf(chip, it.ecef) }
+
+private fun offsetOf(chip: Geodetic?, at: Ecef): Offset3? {
+    if (chip == null) return null
+    val d = Solver.offset(chip, at)
     return Offset3(d[0], d[1], d[2])
+}
+
+/** The super position's line: what it used and how far it is from the chip's fix. */
+@Composable
+private fun FusedRow(f: FusedFix?, offset: Offset3?, prefs: DisplayPrefs) {
+    val detail = when {
+        f == null -> "starting"
+        !f.usable && f.updates < FusedFix.MIN_UPDATES -> "settling"
+        !f.usable -> "lost the satellites ${f.sinceUpdateS.toInt()} s ago"
+        else -> "${f.satellites} sats" +
+            (offset?.let { "  " + Format.distance(it.horizontal, prefs.units) + " " + it.direction() } ?: "") +
+            "  ±" + Format.distance(f.horizontalAccuracyM, prefs.units) +
+            (if (f.rejected > 0) "  ${f.rejected} left out" else "")
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(vertical = 2.dp)) {
+        Box(
+            Modifier
+                .size(9.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.onSurface)
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            text = "TPS",
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            fontFamily = KibernetykMono,
+            modifier = Modifier.width(monoWidthOf(8, 11))
+        )
+        Text(detail, color = MaterialTheme.colorScheme.onSurface, fontSize = 11.sp, fontFamily = KibernetykMono)
+    }
 }
 
 @Composable
 internal fun OwnFixesCard(state: GnssEngine.State, prefs: DisplayPrefs, raw: RawUi) {
     val r = state.raw
     val report = r.report
-    val fix = state.fix
-    val chip = fix?.takeIf { state.fixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
+    // Everything here is measured from the chip's own fix, never from TPS's.
+    val chip = state.chipFix?.takeIf { state.chipFixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
@@ -103,7 +139,11 @@ internal fun OwnFixesCard(state: GnssEngine.State, prefs: DisplayPrefs, raw: Raw
         Column(modifier = Modifier.padding(12.dp)) {
             CardTitle("OWN FIXES")
             Spacer(Modifier.height(4.dp))
-            Note("TPS's own position from the raw signals, one per system and one from all of them, around the chip's fix at the centre.")
+            Note(
+                "TPS's own positions from the raw signals, around the chip's fix at the centre: the super position " +
+                    "(every satellite, one clock, filtered over time; it's the position on the main screen), and " +
+                    "each second on its own, per system and from all of them."
+            )
             Spacer(Modifier.height(8.dp))
             // Android 12+ says outright what the chip can do; earlier, only the callbacks tell.
             val canMeasure = raw.chip.capability(ChipInfo.RAW)
@@ -134,10 +174,13 @@ internal fun OwnFixesCard(state: GnssEngine.State, prefs: DisplayPrefs, raw: Raw
             val systems = report!!.systems
             val solved = systems.mapNotNull { s -> offsetOf(chip, s.solution)?.let { s to it } }
             val combined = offsetOf(chip, report.combined)
-            if (chip != null && (solved.isNotEmpty() || combined != null)) {
-                OffsetPlot(solved.map { it.first.constellation to it.second }, combined, prefs.shapes)
+            val fused = report.fused?.takeIf { it.usable }
+            val fusedOffset = fused?.let { offsetOf(chip, it.ecef) }
+            if (chip != null && (solved.isNotEmpty() || combined != null || fusedOffset != null)) {
+                OffsetPlot(solved.map { it.first.constellation to it.second }, combined, fusedOffset, prefs.shapes)
                 Spacer(Modifier.height(8.dp))
             }
+            FusedRow(report.fused, fusedOffset, prefs)
             for (s in systems) SystemRow(s, offsetOf(chip, s.solution), prefs, chipPositions = r.pvtSeen)
             report.combined?.let { c ->
                 CombinedRow(c, combined, prefs)
@@ -262,10 +305,10 @@ private fun monoWidthOf(chars: Int, sp: Int) = org.soulstone.tps.ui.theme.monoWi
 
 /** Each system's own fix around the chip's (the centre), north up, on a scale that fits them all. */
 @Composable
-private fun OffsetPlot(points: List<Pair<Constellation, Offset3>>, combined: Offset3?, shapes: Boolean) {
+private fun OffsetPlot(points: List<Pair<Constellation, Offset3>>, combined: Offset3?, fused: Offset3?, shapes: Boolean) {
     val measurer = rememberTextMeasurer()
     val labelStyle = TextStyle(color = SkyColors.GridLabel, fontSize = 9.sp, fontFamily = KibernetykMono)
-    val farthest = (points.map { it.second.horizontal } + listOfNotNull(combined?.horizontal)).maxOrNull() ?: 0.0
+    val farthest = (points.map { it.second.horizontal } + listOfNotNull(combined?.horizontal, fused?.horizontal)).maxOrNull() ?: 0.0
     val scale = SCALES.firstOrNull { it >= farthest * 1.1 } ?: SCALES.last()
     val onSurface = MaterialTheme.colorScheme.onSurface
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -297,13 +340,14 @@ private fun OffsetPlot(points: List<Pair<Constellation, Offset3>>, combined: Off
             drawLine(onSurface, Offset(c.x - arm, c.y), Offset(c.x + arm, c.y), 2.dp.toPx())
             drawLine(onSurface, Offset(c.x, c.y - arm), Offset(c.x, c.y + arm), 2.dp.toPx())
             combined?.let { drawCircle(onSurface, radius = 7.dp.toPx(), center = at(it), style = Stroke(2.dp.toPx())) }
+            fused?.let { drawCircle(onSurface, radius = 5.dp.toPx(), center = at(it)) }
             for ((system, o) in points) {
                 drawMark(if (shapes) system.shape else MarkShape.CIRCLE, at(o), 5.dp.toPx(), system.color, filled = true)
             }
         }
     }
     Text(
-        text = "+ the chip's fix   ○ all systems (TPS)   outer ring ${formatScale(scale)}",
+        text = "+ the chip's fix   ● TPS   ○ all systems, this second   outer ring ${formatScale(scale)}",
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 10.sp,
         fontFamily = KibernetykMono,

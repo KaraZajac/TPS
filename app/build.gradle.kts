@@ -14,8 +14,8 @@ android {
         applicationId = "org.soulstone.tps"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.3.0-dev.3"
+        versionCode = 8
+        versionName = "0.3.0-dev.4"
         // On-device checks of what only a real Android runtime can answer (run on an emulator).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -23,6 +23,15 @@ android {
     // Fixed debug keystore committed to the repo (a debug key is non-secret; its
     // password is the well-known "android") so CI and local builds sign
     // identically and an update installs over the previous build.
+    testOptions {
+        unitTests.all {
+            // A raw recording to replay (RecordingReplayTest). Recordings hold the place they
+            // were made, so they stay out of the repo and come in only from the command line.
+            val recording = providers.gradleProperty("tps.recording").orNull
+            if (recording != null) it.systemProperty("tps.recording", recording)
+        }
+    }
+
     signingConfigs {
         getByName("debug") {
             storeFile = rootProject.file("debug.keystore")

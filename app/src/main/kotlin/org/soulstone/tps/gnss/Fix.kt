@@ -38,6 +38,9 @@ data class Fix(
     val mock: Boolean = false,
 )
 
+/** Who computed the position on screen: TPS itself (the super position), or the phone's GNSS chip. */
+enum class FixSource { TPS, CHIP }
+
 /** The fix ring's colour tiers. Green means good here (unlike OVERWATCH, where it means clear). */
 enum class FixTier { IDLE, SEARCHING, POOR, FAIR, GOOD }
 

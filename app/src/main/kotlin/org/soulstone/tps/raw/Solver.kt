@@ -110,6 +110,17 @@ data class Observation(
     /** The chip's own delay estimates for this signal, used instead of TPS's models when given. */
     val ionoMeters: Double? = null,
     val tropoMeters: Double? = null,
+    // For the super position (SuperPosition): Doppler, weights and the chip's inter-system bias.
+    /** The satellite's velocity at transmit time, Earth-fixed, m/s; null when unknown. */
+    val satelliteVelocity: Ecef? = null,
+    /** How fast the satellite's clock offset grows, m/s. */
+    val satelliteClockDriftMps: Double = 0.0,
+    /** The measured pseudorange rate (uncorrected for either clock's drift) and its 1σ, m/s. */
+    val rateMps: Double? = null,
+    val rateSigmaMps: Double? = null,
+    val cn0DbHz: Double? = null,
+    /** The chip's inter-signal bias for this signal against its reference (GPS L1 C/A), metres. */
+    val isbMeters: Double? = null,
 )
 
 data class SolvedSatellite(val constellation: Constellation, val svid: Int, val elevationDeg: Double, val residual: Double)

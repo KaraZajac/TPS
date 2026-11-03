@@ -41,6 +41,8 @@ data class OwnFixReport(
     val chipOrbitsDropped: Int = 0,
     /** Where the chip's orbits came from ([EphemerisSource] to signals; -1 when it doesn't say). */
     val chipOrbitSources: Map<Int, Int> = emptyMap(),
+    /** The super position: every satellite, one clock, filtered over time. */
+    val fused: FusedFix? = null,
 )
 
 /**
@@ -57,6 +59,7 @@ class OwnFixEngine {
     private val orbits = HashMap<Pair<Constellation, Int>, KeplerEphemeris>()
     private val navCounts = HashMap<Int, Int>()
     private var disagreeing = 0
+    private val fusion = SuperPosition()
 
     val klobuchar: Klobuchar? get() = gps.klobuchar ?: qzss.klobuchar
 
@@ -115,9 +118,13 @@ class OwnFixEngine {
                 chipDropped++
                 continue
             }
-            observations += Observation(
-                m.constellation, m.svid, pvt.position, pvt.clockMeters / Pseudoranges.C, r.meters, r.sigmaMeters, m.carrierHz,
-                ionoMeters = pvt.ionoMeters, tropoMeters = pvt.tropoMeters,
+            observations += withDoppler(
+                Observation(
+                    m.constellation, m.svid, pvt.position, pvt.clockMeters / Pseudoranges.C, r.meters, r.sigmaMeters, m.carrierHz,
+                    ionoMeters = pvt.ionoMeters, tropoMeters = pvt.tropoMeters,
+                    satelliteVelocity = pvt.velocity, satelliteClockDriftMps = pvt.clockDriftMps,
+                ),
+                m,
             )
             fromChip += key
             val source = pvt.ephemerisSource ?: -1
@@ -143,6 +150,7 @@ class OwnFixEngine {
         } else {
             null
         }
+        val fused = fusion.step(epoch.clock, observations, chipEcef ?: combined?.ecef, klobuchar, receiveGpsSeconds)
         return OwnFixReport(
             systems = systems,
             combined = combined,
@@ -153,6 +161,7 @@ class OwnFixEngine {
             chipOrbits = fromChip.size,
             chipOrbitsDropped = chipDropped,
             chipOrbitSources = chipSources,
+            fused = fused,
         )
     }
 
@@ -171,7 +180,28 @@ class OwnFixEngine {
             disagreeing++
             return null
         }
-        return Observation(m.constellation, m.svid, state.position, state.clockError, r.meters, r.sigmaMeters, m.carrierHz)
+        // Velocity and clock drift for the Doppler, from the orbit half a second either side.
+        val before = Orbits.state(eph, t - 0.5)
+        val after = Orbits.state(eph, t + 0.5)
+        return withDoppler(
+            Observation(
+                m.constellation, m.svid, state.position, state.clockError, r.meters, r.sigmaMeters, m.carrierHz,
+                satelliteVelocity = after.position - before.position,
+                satelliteClockDriftMps = (after.clockError - before.clockError) * Pseudoranges.C,
+            ),
+            m,
+        )
+    }
+
+    /** Adds what the super position needs from the measurement itself. */
+    private fun withDoppler(o: Observation, m: RawMeasurement): Observation {
+        val rateSigma = m.pseudorangeRateUncertaintyMps.takeIf { it > 0 && it < MAX_RATE_SIGMA }
+        return o.copy(
+            rateMps = m.pseudorangeRateMps.takeIf { rateSigma != null && it.isFinite() },
+            rateSigmaMps = rateSigma,
+            cn0DbHz = m.cn0DbHz,
+            isbMeters = m.fullInterSignalBiasNanos?.takeIf { it.isFinite() }?.times(1e-9 * Pseudoranges.C),
+        )
     }
 
     /**
@@ -193,5 +223,7 @@ class OwnFixEngine {
         /** Broadcast orbits are good for about four hours around their reference time. */
         const val MAX_AGE_S = 4 * 3600.0
         const val MAX_DISAGREEMENT_DEG = 3.0
+        /** Rates less certain than this (m/s) are left out of the super position. */
+        const val MAX_RATE_SIGMA = 20.0
     }
 }

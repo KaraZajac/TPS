@@ -37,6 +37,7 @@ import org.soulstone.tps.raw.Agc
 import org.soulstone.tps.raw.ChipInfo
 import org.soulstone.tps.raw.ChipPvt
 import org.soulstone.tps.raw.ChipPvtReader
+import org.soulstone.tps.raw.FusedFix
 import org.soulstone.tps.raw.Geodetic
 import org.soulstone.tps.raw.NavMessage
 import org.soulstone.tps.raw.OwnFixEngine
@@ -76,7 +77,12 @@ class GnssEngine private constructor(context: Context) {
         val startedAtMs: Long = 0,
         val nowMs: Long = 0,
         val sky: SkySnapshot = SkySnapshot.EMPTY,
+        /** The position to show: TPS's own ([tpsFix]) when it has one, else the chip's. Derived. */
         val fix: Fix? = null,
+        /** The chip's own fix (Android's GPS provider). */
+        val chipFix: Fix? = null,
+        /** TPS's super position as a fix, while it has a usable one. */
+        val tpsFix: Fix? = null,
         val nmea: NmeaTracker.State = NmeaTracker.State(),
         val ttff: Ttff? = null,
         // Derived on every update (see derive()).
@@ -87,6 +93,10 @@ class GnssEngine private constructor(context: Context) {
         val dopFromChip: Boolean = false,
         val sbasCorrections: Boolean = false,
         val tier: FixTier = FixTier.IDLE,
+        val fixSource: FixSource = FixSource.CHIP,
+        val chipFixValid: Boolean = false,
+        /** Satellites behind the shown fix. */
+        val usedSatellites: Int = 0,
         val raw: RawState = RawState(),
     ) {
         val running: Boolean get() = wanted && status == Status.RUNNING
@@ -225,22 +235,32 @@ class GnssEngine private constructor(context: Context) {
     private fun derive(s: State): State {
         val now = SystemClock.elapsedRealtime()
         val running = s.wanted && s.status == Status.RUNNING
-        val fix = s.fix
-        val fixValid = running && fix != null && now - fix.elapsedRealtimeMs <= FixQuality.STALE_MS
+        fun fresh(f: Fix?) = running && f != null && now - f.elapsedRealtimeMs <= FixQuality.STALE_MS
+        // TPS's own position when it has a current one; the chip's otherwise.
+        val tps = s.tpsFix?.takeIf { fresh(it) }
+        val chipValid = fresh(s.chipFix)
+        val fix = tps ?: s.chipFix
+        val fixValid = tps != null || chipValid
         val n = s.nmea
         val chipType = n.fixType?.takeIf { now - n.fixTypeAtMs <= NMEA_FRESH_MS && it != FixType.NO_FIX }
         val fixType = when {
             !fixValid -> null
+            // TPS solves for height every time.
+            tps != null -> FixType.THREE_D
             chipType != null -> chipType
-            else -> FixQuality.inferFixType(true, fix.altitudeM != null, s.sky.used)
+            else -> FixQuality.inferFixType(true, fix?.altitudeM != null, s.sky.used)
         }
         val chipDop = n.dop?.takeIf { now - n.dopAtMs <= NMEA_FRESH_MS }
         val dop = if (!fixValid) null else chipDop ?: DopCalculator.compute(s.sky.satellites)
         return s.copy(
             nowMs = now,
+            fix = fix,
             fixValid = fixValid,
+            fixSource = if (tps != null) FixSource.TPS else FixSource.CHIP,
+            chipFixValid = chipValid,
+            usedSatellites = if (tps != null) s.raw.report?.fused?.satellites ?: s.sky.used else s.sky.used,
             fixType = fixType,
-            fixTypeFromChip = fixValid && chipType != null,
+            fixTypeFromChip = fixValid && tps == null && chipType != null,
             dop = dop,
             dopFromChip = fixValid && chipDop != null,
             sbasCorrections = fixValid && n.ggaQuality == 2 && now - n.ggaAtMs <= NMEA_FRESH_MS,
@@ -321,7 +341,7 @@ class GnssEngine private constructor(context: Context) {
                 recorder.fix(location)
                 val fix = toFix(location, tracker.state)
                 update(id) { s ->
-                    s.copy(fix = fix, ttff = s.ttff ?: Ttff(fix.elapsedRealtimeMs - s.startedAtMs, fromChip = false))
+                    s.copy(chipFix = fix, ttff = s.ttff ?: Ttff(fix.elapsedRealtimeMs - s.startedAtMs, fromChip = false))
                 }
             }
 
@@ -335,7 +355,7 @@ class GnssEngine private constructor(context: Context) {
             }
 
             override fun onProviderDisabled(provider: String) {
-                update(id) { it.copy(status = Status.LOCATION_OFF, sky = SkySnapshot.EMPTY, fix = null) }
+                update(id) { it.copy(status = Status.LOCATION_OFF, sky = SkySnapshot.EMPTY, chipFix = null, tpsFix = null) }
             }
         }
 
@@ -369,12 +389,17 @@ class GnssEngine private constructor(context: Context) {
                 val epoch = toEpoch(event)
                 recorder.raw(event, epoch)
                 val s = _state.value
-                val chip = s.fix?.takeIf { s.fixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
+                // Own fixes are compared with, and checked against, the chip's fix: never TPS's own.
+                val chip = s.chipFix?.takeIf { s.chipFixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
                 // Defensive: one odd measurement mustn't take down the GNSS thread.
                 val report = runCatching { ownFix.solve(epoch, chip, s.sky) }.getOrNull()
                 val withPvt = epoch.measurements.mapNotNull { it.pvt }
+                // The super position, as the fix TPS shows; dropped as soon as it isn't usable.
+                val tps = if (report == null) s.tpsFix else report.fused?.takeIf { it.usable }?.let { fusedToFix(it, epoch.clock, s.chipFix) }
+                if (report != null) tps?.let { recorder.tpsFix(it) }
                 update(id) {
                     it.copy(
+                        tpsFix = tps,
                         raw = it.raw.copy(
                             measurements = RawStatus.READY,
                             epochs = it.raw.epochs + 1,
@@ -497,6 +522,8 @@ class GnssEngine private constructor(context: Context) {
                 snrDb = if (m.hasSnrInDb()) m.snrInDb else null,
                 basebandCn0DbHz = if (Build.VERSION.SDK_INT >= 30 && m.hasBasebandCn0DbHz()) m.basebandCn0DbHz else null,
                 codeType = if (Build.VERSION.SDK_INT >= 29 && m.hasCodeType()) m.codeType else null,
+                fullInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= 30 && m.hasFullInterSignalBiasNanos()) m.fullInterSignalBiasNanos else null,
+                satelliteInterSignalBiasNanos = if (Build.VERSION.SDK_INT >= 30 && m.hasSatelliteInterSignalBiasNanos()) m.satelliteInterSignalBiasNanos else null,
                 pvt = pvt,
             )
         }
@@ -544,6 +571,31 @@ class GnssEngine private constructor(context: Context) {
         )
     }
 
+    /** TPS's super position as a [Fix], for the screen. */
+    private fun fusedToFix(f: FusedFix, clock: RawClock, chip: Fix?): Fix {
+        val leap = clock.leapSecond ?: org.soulstone.tps.raw.Pseudoranges.DEFAULT_LEAP_SECONDS
+        val gpsNs = clock.fullBiasNanos?.let { clock.timeNanos - it - Math.round(clock.biasNanos) }
+        val gnssMs = gpsNs?.let { it / 1_000_000 + GPS_EPOCH_UNIX_MS - leap * 1_000L }
+        val elapsedNs = clock.elapsedRealtimeNanos ?: SystemClock.elapsedRealtimeNanos()
+        val wallAtFix = System.currentTimeMillis() - (SystemClock.elapsedRealtimeNanos() - elapsedNs) / 1_000_000
+        // Height above sea level: the geoid's height under the chip's fix is the same a few metres away.
+        val undulation = chip?.let { c -> c.altitudeM?.let { h -> c.mslAltitudeM?.let { h - it } } }
+        return Fix(
+            latitude = f.position.latitude,
+            longitude = f.position.longitude,
+            accuracyM = f.horizontalAccuracyM.toFloat(),
+            altitudeM = f.position.height,
+            mslAltitudeM = undulation?.let { f.position.height - it },
+            mslSource = if (undulation != null) chip.mslSource else null,
+            verticalAccuracyM = f.verticalAccuracyM.toFloat(),
+            speedMps = f.speedMps.toFloat(),
+            bearingDeg = f.bearingDeg?.toFloat(),
+            gnssTimeMs = gnssMs ?: chip?.gnssTimeMs ?: wallAtFix,
+            elapsedRealtimeMs = elapsedNs / 1_000_000,
+            clockOffsetMs = gnssMs?.let { wallAtFix - it } ?: chip?.clockOffsetMs,
+        )
+    }
+
     @RequiresApi(34)
     private object Api34 {
         private var converter: AltitudeConverter? = null
@@ -579,7 +631,7 @@ class GnssEngine private constructor(context: Context) {
                 update(id) { s ->
                     s.copy(
                         sky = snapshot,
-                        fix = frame.fix ?: s.fix,
+                        chipFix = frame.fix ?: s.chipFix,
                         nmea = nmea,
                         ttff = frame.ttffMs?.let { Ttff(it, fromChip = true) } ?: s.ttff,
                     )
@@ -592,6 +644,9 @@ class GnssEngine private constructor(context: Context) {
     companion object {
         /** NMEA values older than this are ignored (the chip stopped sending them). */
         private const val NMEA_FRESH_MS = 3_000L
+
+        /** 1980-01-06, the GPS epoch, in Unix milliseconds. */
+        private const val GPS_EPOCH_UNIX_MS = 315_964_800_000L
 
         @Volatile private var INSTANCE: GnssEngine? = null
 

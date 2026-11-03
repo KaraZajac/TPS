@@ -15,7 +15,8 @@ import java.util.Locale
  * Writes raw GNSS data in GnssLogger's text format (`Raw`, `Nav`, `Fix`, `Status` lines),
  * so a recording also opens in Google's own GNSS analysis tools. `SatPvt` lines are TPS's own
  * addition: the chip's satellite positions, which GnssLogger doesn't record (tools skip
- * line types they don't know). Used only on the GNSS thread.
+ * line types they don't know). `Fix` lines with the provider `TPS` are TPS's own position,
+ * next to the chip's (`GPS`). Used only on the GNSS thread.
  */
 class RawRecorder(private val dir: File) {
     private var writer: BufferedWriter? = null
@@ -158,6 +159,19 @@ class RawRecorder(private val dir: File) {
                 if (l.hasBearingAccuracy()) l.bearingAccuracyDegrees.toString() else "",
                 l.elapsedRealtimeNanos.toString(),
                 if (l.hasVerticalAccuracy()) l.verticalAccuracyMeters.toString() else "",
+            ).joinToString(",")
+        )
+    }
+
+    /** TPS's own position (the super position), as a `Fix` line with the provider `TPS`. */
+    fun tpsFix(f: org.soulstone.tps.gnss.Fix) {
+        if (writer == null) return
+        line(
+            listOf(
+                "Fix", "TPS", f.latitude.toString(), f.longitude.toString(),
+                f.altitudeM?.toString() ?: "", f.speedMps?.toString() ?: "", f.accuracyM?.toString() ?: "",
+                f.bearingDeg?.toString() ?: "", f.gnssTimeMs.toString(), "", "",
+                (f.elapsedRealtimeMs * 1_000_000).toString(), f.verticalAccuracyM?.toString() ?: "",
             ).joinToString(",")
         )
     }

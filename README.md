@@ -39,7 +39,16 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
 - **The ring** around it is fix quality: red and pulsing while searching, orange for a 2D
   fix or accuracy worse than 15 m, yellow for 15 m or better, green for 5 m or better.
 - **Position**: coordinates (decimal or degrees-minutes-seconds) and a **geohash**, each
-  tap to copy, with height above sea level and speed.
+  tap to copy, with height above sea level and speed. It's TPS's own **super position**
+  where the phone allows (labelled `TPS`), and the chip's otherwise (`chip`).
+- **The super position**: TPS's own fix from every satellite of every system at once. One
+  receiver clock, with each system's offset from it learned (or taken from the chip), so
+  any mix of satellites counts, not four per system; a Kalman filter that carries
+  position, velocity and clock from second to second, so even one to three satellites a
+  second keep it going; Doppler for velocity; and each measurement checked against the
+  filter's expectation and left out if it doesn't fit. On a test recording it stayed
+  within 3 m of the chip's fix typically and 8 m 95% of the time, where TPS's per-second
+  fixes wandered 18 m and 79 m. It needs raw measurements and orbits (below).
 - **Fix line**: 2D or 3D, satellites used out of those in view, time to first fix, HDOP,
   and whether the fix uses two frequencies.
 - **Satellite time**: the time from GNSS, in your time zone and in UTC, and how far off
@@ -52,8 +61,8 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
 - **The circle turns with the phone** (heading-up), so the triangle points the way to
   walk. Turn **Turn with the phone** off in Settings for north-up.
 - **Own fixes** (in progress, v0.3): on phones that hand apps raw measurements, TPS
-  computes its own position, once per system and once for all, plotted around the chip's
-  fix. A different answer from the chip, or from another system, is a cross-check
+  computes its own positions: the super position, plus each second on its own per system
+  and from all of them, plotted around the chip's fix. A different answer from the chip, or from another system, is a cross-check
   against spoofing. TPS gets the orbits by decoding the satellites' navigation messages
   itself (GPS and Galileo so far). On phones that don't pass those on, it uses the
   satellite positions the chip computes: Android makes the getter system-only, but every
@@ -73,8 +82,11 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   `LocationManager` for `GPS_PROVIDER` fixes directly. The fused provider would hide which
   satellites made a fix, and Android only runs the GNSS engine while someone holds such a
   request.
-- **The phone's GNSS chip computes the fix**, combining every constellation it receives.
-  Android doesn't let apps choose which. TPS shows which satellites the chip used.
+- **Two fixes.** The phone's GNSS chip computes one, combining every constellation it
+  receives (Android doesn't let apps choose which). TPS computes its own from the chip's
+  raw measurements (pseudoranges and Doppler) and the satellites' orbits, and shows it
+  once it has settled, falling back to the chip's in demo sky, on phones without raw
+  data, and whenever its own isn't current.
 - Satellites come from `GnssStatus`. A dual-frequency satellite arrives once per band,
   and TPS merges the entries. Band names come from the carrier frequency, as each system
   names it (L5 is E5a on Galileo and B2a on BeiDou).

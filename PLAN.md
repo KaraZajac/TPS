@@ -31,6 +31,7 @@ TPS makes that visible. It fits the TERRAN idea of "one people without nations".
 | 8 | **Typeface** | **Kibernetyk Mono** by Pavlo Kilko, everywhere (SIL OFL 1.1; the license ships in the APK). Its glyphs are 0.72 em wide, and it has no ± or ▲, which Android draws from the system font. |
 | 9 | **Waypoints button** | A **star**. **Add where I am** asks for a label in a dialog. |
 | 10 | **Orbits on phones without navigation messages** | The **chip's own satellite positions** (`SatellitePvt`), read from each measurement's public serialized form (§8). Chosen by Kara after the CHIP card showed their phone sends raw measurements but no navigation messages. The alternative, importing a daily orbit file downloaded in the browser, stays possible later. |
+| 11 | **The position on the main screen** | **TPS's own super position** (§8) when it has a current one, the chip's otherwise, labelled `TPS` or `chip`. Chosen by Kara after a prototype on their recording stayed within ~3 m of the chip's fix. |
 
 ## 2. What the research found
 
@@ -341,7 +342,7 @@ org.soulstone.tps
 | **v0.1.0** ✓ released 2026-11-02 | The sky circle, the Constellations sheet, position readout, START/STOP, permission flow, settings (theme/units/coordinates), MSL height, demo sky, launcher icon (sky-plot glyph on OVERWATCH's dark background), unit tests. Tested on Kara's phone. |
 | **v0.2.0** built 2026-11-02, tested on Kara's phone | Starts on its own (no START/STOP), satellite time, geohash, waypoints (paste a list, add where you are) and navigation to them on the ring, heading-up compass as a setting. |
 | **v0.2.1** built 2026-11-02, awaiting the phone test | Kibernetyk Mono everywhere, heading-up by default, a star for the waypoints, a label dialog for Add where I am. |
-| **v0.3.0** step 1 built 2026-11-02 (0.3.0-dev); 0.3.0-dev.2 awaiting the outdoor test | **Own fixes, step 1** (§8): CHIP card with the capabilities and live raw-data status, a raw-data recorder (GnssLogger format, shared from the phone), pseudoranges, GPS and Galileo navigation-message decoding, and per-constellation fixes next to the chip's. "Unsupported vs not in view" on the cards. Kara's CHIP card (Sony XQ-CT62, Android 14, Qualcomm): raw measurements yes, navigation messages no, satellite PVT yes. So **0.3.0-dev.2** adds own fixes from the chip's satellite positions, which covers GPS, Galileo and GLONASS on that phone. |
+| **v0.3.0** step 1 built 2026-11-02 (0.3.0-dev); own fixes on Kara's phone from the chip's satellite positions (0.3.0-dev.2, tested outdoors); saving recordings (0.3.0-dev.3); the super position as the main position (0.3.0-dev.4) | **Own fixes, step 1** (§8): CHIP card with the capabilities and live raw-data status, a raw-data recorder (GnssLogger format, shared from the phone), pseudoranges, GPS and Galileo navigation-message decoding, and per-constellation fixes next to the chip's. "Unsupported vs not in view" on the cards. Kara's CHIP card (Sony XQ-CT62, Android 14, Qualcomm): raw measurements yes, navigation messages no, satellite PVT yes. So **0.3.0-dev.2** adds own fixes from the chip's satellite positions, which covers GPS, Galileo and GLONASS on that phone. |
 | **v0.4.0** | **Own fixes, step 2:** GLONASS and BeiDou decoding, the "each nation's answer" plot, and the **integrity check** (§8): own fixes vs the chip's, AGC per band, C/N0 flattening, clock and position jumps, with honest limits. Then per-band detail, satellite trails, cold start / TTFF test. |
 | **Later** | tps.netslum.io site, F-Droid submission, GPX/NMEA logging. |
 
@@ -456,6 +457,25 @@ doesn't share the chip's filtering or assistance data.
   satellite's azimuth and elevation computed from it must match `GnssStatus` within 3°,
   or it's dropped. The chip's positions must also be physically possible (medium Earth
   to geostationary orbit, sane clock and delays).
+
+**The super position (0.3.0-dev.4).** An extended Kalman filter over every satellite of
+every system: position, velocity, one receiver clock and its drift, and an offset per
+system (inter-system bias). The chip's own inter-system biases (`FullInterSignalBiasNanos`)
+are applied first when it reports them (on Kara's phone they matched TPS's own estimates to
+within 6 m); the filter learns what's left, or the whole offset when the chip doesn't say.
+So any mix of satellites counts. Pseudoranges are re-referenced to the chip's clock offset
+at the start, so the clock simply drifts, the drift the Doppler measures: this works
+whether or not the chip steers its clock. Doppler (pseudorange rate) measures velocity and
+drift. Each measurement is gated at 5σ against the prediction; a common jump of all
+pseudoranges (or all rates) is taken as a clock jump and absorbed; after three rounds with
+most pseudoranges rejected, or a clock discontinuity, or 30 s without data, it restarts
+from a snapshot fix. Motion noise follows the smoothed horizontal speed (standing, walking,
+driving). It's shown once it has had three updates, its last within 5 s, and claims 100 m
+or better. On Kara's recording (2 minutes, GPS + Galileo + GLONASS, 2–15 signals a
+second) it stayed within 3.3 m of the chip's fix typically and 8.0 m 95% of the time,
+against 18 m and 79 m for the per-second snapshot; after 30 s, one to three satellites a
+second held it within about 10 m. `RecordingReplayTest` replays a recording through the
+real pipeline (pass one with `-Ptps.recording=`; recordings never enter the repo).
 
 **The solver.** Iterative weighted least squares on the pseudoranges: position plus a
 clock term per constellation; satellite clock (af0–af2, relativity, group delay), Earth
