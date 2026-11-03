@@ -614,9 +614,17 @@ these are distances from the chip, not errors.
   holds (caution, alert past 200 m); a spoofer that stops ends the hold quietly; picked up
   mid-hold, TPS lets go once the place is within reach; a smooth 20 m/s ride with the
   sensors feeling still triggers nothing, because rest needs the signals to agree first.
+- First real motion data (Kara's dev.9 bedroom recording, 160 s, 24 dB-Hz, about 5
+  satellites a second): at rest the Sony's accelerometer reads 0.010–0.013 m/s² (largest
+  axis) and its gyro about 0.002 rad/s, so the thresholds sit about five times above that.
+  "At rest" in 136 of 160 s (moving when the phone was set down, and at one bump); static mode
+  on in 115 of the 125 rounds TPS was shown, vertical speed 0.0 m/s; TPS 7.4 m from the
+  chip's fix typically (16 m at most, the chip claiming ±16 m), within its claims throughout;
+  no hold, no warning. The replay test now counts "shown" from TPS's first fix and scales its
+  accuracy limits to the chip's own claims.
 - Limits: a drag that starts while the phone moves can't be told from real motion; a very
   smooth start with the phone perfectly still (a ship) could read as a drag, and the warning
-  says so; the thresholds haven't met real motion data yet.
+  says so; hand-held and pocket readings haven't been recorded yet.
 
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;

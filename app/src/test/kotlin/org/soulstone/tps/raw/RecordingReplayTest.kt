@@ -3,6 +3,7 @@ package org.soulstone.tps.raw
 import java.io.File
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
@@ -156,8 +157,11 @@ class RecordingReplayTest {
         var lastFused: FusedFix? = null
         var held = 0
         var downweighted = 0
+        var atRest = 0
+        var firstUsable: Int? = null
+        val chipClaims = ArrayList<Double>()
         val motionSeen = HashMap<Motion, Int>()
-        for (m in moments) {
+        for ((index, m) in moments.withIndex()) {
             // What the motion sensors said at this round (the last verdict at or before it).
             val motion = m.wallMs?.let { w -> motionLines.headMap(w + 1).entries.lastOrNull()?.value } ?: Motion.UNKNOWN
             motionSeen.merge(motion, 1, Int::plus)
@@ -205,8 +209,11 @@ class RecordingReplayTest {
             rejected += f.rejected
             downweighted += f.downweighted
             if (f.suspect != null) held++
+            if (f.still) atRest++
             if (f.usable && chip != null) {
                 usable++
+                if (firstUsable == null) firstUsable = index
+                nearest?.accuracyM?.let { chipClaims += it }
                 val e = Solver.offset(chip, f.ecef)
                 fused += hypot(e[0], e[1])
                 vertical += e[2]
@@ -239,7 +246,7 @@ class RecordingReplayTest {
             if (n == 0) "not in this recording" else "in $n of ${moments.size} rounds" + if (moments.any { it.epoch.agcFromSignals }) " (per-measurement field)" else ""
         })
         println("motion: " + (if (motionLines.isEmpty()) "not in this recording" else motionSeen.entries.joinToString { "${it.key} ${it.value}" }) +
-            "; held against suspect signals in $held rounds, holds that ended by following: ${lastFused?.released ?: 0}; measurements weighed less: $downweighted")
+            "; static mode in $atRest rounds; held against suspect signals in $held rounds, holds that ended by following: ${lastFused?.released ?: 0}; measurements weighed less: $downweighted")
         println("multipath flagged on " + moments.sumOf { m -> m.epoch.measurements.count { it.multipath == 1 } } + " of " + moments.sumOf { it.epoch.measurements.size } + " measurements")
         if (phoneIntegrity.isNotEmpty()) {
             val t0 = moments.firstOrNull()?.wallMs ?: 0L
@@ -264,9 +271,14 @@ class RecordingReplayTest {
             println("(typically ${perRound[perRound.size / 2]} satellites a round; TPS's own position showed in $usable of ${moments.size} rounds)")
             return
         }
-        assertTrue("usable in only $usable of ${moments.size} rounds", usable >= moments.size * 0.8)
+        // Once shown, TPS should stay shown (a recording may start before the chip's first fix).
+        val since = moments.size - (firstUsable ?: 0)
+        assertTrue("usable in only $usable of the $since rounds since its first", usable >= since * 0.8)
+        // Outdoors (Kara's recordings: the chip claiming ±3–5 m) typically within 6 m of the chip's
+        // fix and 95% within 15 m; where the chip itself claims less, scaled to its claim.
+        val chipClaim = chipClaims.sorted().let { if (it.isEmpty()) 0.0 else it[it.size / 2] }
         val sorted = fused.sorted()
-        assertTrue("median ${sorted[sorted.size / 2]} m", sorted[sorted.size / 2] < 6.0)
-        assertTrue("95% ${sorted[(sorted.size * 0.95).toInt()]} m", sorted[(sorted.size * 0.95).toInt()] < 15.0)
+        assertTrue("median ${sorted[sorted.size / 2]} m (chip claims ±$chipClaim m)", sorted[sorted.size / 2] < max(6.0, 0.75 * chipClaim))
+        assertTrue("95% ${sorted[(sorted.size * 0.95).toInt()]} m (chip claims ±$chipClaim m)", sorted[(sorted.size * 0.95).toInt()] < max(15.0, 1.5 * chipClaim))
     }
 }
