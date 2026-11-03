@@ -39,6 +39,8 @@ class RecordingReplayTest {
         val status = sortedMapOf<Long, MutableList<List<String>>>()
         // The API 33 AGC list, by the event's wall time: utcTimeMillis, ConstellationType, CarrierFrequencyHz, AgcDb.
         val agcLines = HashMap<Long, MutableList<Agc>>()
+        // What the phone's own integrity checks showed (dev.8 on): utcTimeMillis, Level, Check, Text.
+        val phoneIntegrity = ArrayList<List<String>>()
         File(path).forEachLine { line ->
             if (line.startsWith("# ")) {
                 val kind = line.removePrefix("# ").substringBefore(",")
@@ -66,6 +68,7 @@ class RecordingReplayTest {
                     )
                 }
                 "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
+                "Integrity" -> phoneIntegrity += values
                 "Agc" -> agcLines.getOrPut(values[0].toLong()) { ArrayList() } +=
                     Agc(Constellation.fromAndroid(values[1].toInt()), values[2].toDouble().toLong(), values[3].toDouble())
             }
@@ -142,6 +145,8 @@ class RecordingReplayTest {
         val nis = ArrayList<Double>()
         val nisBySystem = HashMap<Constellation, ArrayList<Double>>()
         val rateNis = ArrayList<Double>()
+        // Per shown round: whether TPS's distance from the chip is within twice their combined claims.
+        val withinClaims = ArrayList<Boolean>()
         val monitor = IntegrityMonitor()
         val findings = LinkedHashSet<String>()
         var worst = Severity.OK
@@ -195,6 +200,7 @@ class RecordingReplayTest {
                 vertical += e[2]
                 climb += abs(f.velocityUp)
                 claimed += f.horizontalAccuracyM
+                withinClaims += hypot(e[0], e[1]) <= 2 * hypot(f.horizontalAccuracyM, nearest?.accuracyM ?: 0.0)
                 f.rangeNis?.let { nis += it }
                 f.rangeNisBySystem.forEach { (c, v) -> nisBySystem.getOrPut(c) { ArrayList() } += v }
                 f.rateNis?.let { rateNis += it }
@@ -221,18 +227,27 @@ class RecordingReplayTest {
             if (n == 0) "not in this recording" else "in $n of ${moments.size} rounds" + if (moments.any { it.epoch.agcFromSignals }) " (per-measurement field)" else ""
         })
         println("multipath flagged on " + moments.sumOf { m -> m.epoch.measurements.count { it.multipath == 1 } } + " of " + moments.sumOf { it.epoch.measurements.size } + " measurements")
+        if (phoneIntegrity.isNotEmpty()) {
+            val t0 = moments.firstOrNull()?.wallMs ?: 0L
+            println("the phone's warnings:" + phoneIntegrity.joinToString("") { v ->
+                "\n  +%.0f s %s %s %s".format((v[0].toLong() - t0) / 1_000.0, v[1], v.getOrElse(2) { "" }, v.getOrElse(3) { "" })
+            })
+        }
+        println("TPS within twice its and the chip's combined claims: ${withinClaims.count { it }} of ${withinClaims.size} rounds shown")
         // A normal outing: no warning should have shown.
         assertTrue("false alarm: $findings", worst == Severity.OK)
+        // Whatever TPS shows, outdoors or in, must keep within what it claims.
+        assertTrue("TPS outside its claims in ${withinClaims.count { !it }} of ${withinClaims.size} rounds", withinClaims.count { !it } <= withinClaims.size / 20)
         if (ph == null || fixes.isEmpty()) {
             println("(no SatPvt or Fix lines: TPS's own position can't be checked on this one)")
             return
         }
-        // Indoors the chip may hand over a couple of satellites a round: then TPS rightly stays
-        // off, and there's no accuracy to check.
+        // Indoors the chip may hand over a couple of satellites a round. TPS then stays off, or
+        // settles on the few rounds with 4 or more and carries on through the rest; either way the
+        // claims check above is what counts, not the outdoor accuracy below.
         val perRound = moments.map { m -> m.epoch.measurements.count { it.pvt != null } }.sorted()
         if (perRound[perRound.size / 2] < 4) {
-            println("(typically ${perRound[perRound.size / 2]} satellites a round: too few for TPS's own position, which showed in $usable of ${moments.size} rounds)")
-            assertTrue("TPS showed a position from too few satellites", usable < moments.size / 10)
+            println("(typically ${perRound[perRound.size / 2]} satellites a round; TPS's own position showed in $usable of ${moments.size} rounds)")
             return
         }
         assertTrue("usable in only $usable of ${moments.size} rounds", usable >= moments.size * 0.8)

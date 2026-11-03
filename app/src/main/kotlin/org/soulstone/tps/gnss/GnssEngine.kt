@@ -426,6 +426,7 @@ class GnssEngine private constructor(context: Context) {
                 if (report != null) tps?.let { recorder.tpsFix(it) }
                 val checks = runCatching { integrity.update(integrityInput(epoch, report?.fused, s, chip)) }.getOrNull()
                 report?.fused?.let { f -> if (checks?.level == Severity.OK) remember(f, chipFix) }
+                checks?.let { recorder.integrity(it) }
                 update(id) {
                     it.copy(
                         tpsFix = tps,

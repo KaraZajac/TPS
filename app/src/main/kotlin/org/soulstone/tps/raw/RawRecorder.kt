@@ -21,6 +21,7 @@ import java.util.Locale
 class RawRecorder(private val dir: File) {
     private var writer: BufferedWriter? = null
     private var lastFullTracking: Boolean? = null
+    private var lastIntegrity: String? = null
 
     var file: File? = null
         private set
@@ -42,6 +43,7 @@ class RawRecorder(private val dir: File) {
         file = f
         lines = 0
         lastFullTracking = null
+        lastIntegrity = null
         startedAtMs = System.currentTimeMillis()
         line("# TPS $appVersion raw GNSS recording (GnssLogger format)")
         line("# Version: v3.0.1.0 Platform: ${Build.VERSION.RELEASE} Manufacturer: ${Build.MANUFACTURER} Model: ${Build.MODEL}")
@@ -50,6 +52,7 @@ class RawRecorder(private val dir: File) {
         line("# Nav,Svid,Type,Status,MessageId,Sub-messageId,Data(Bytes)")
         line("# Status,UnixTimeMillis,SignalCount,SignalIndex,ConstellationType,Svid,CarrierFrequencyHz,Cn0DbHz,AzimuthDegrees,ElevationDegrees,UsedInFix,HasAlmanacData,HasEphemerisData,BasebandCn0DbHz")
         line("# Agc,utcTimeMillis,ConstellationType,CarrierFrequencyHz,AgcDb")
+        line("# Integrity,utcTimeMillis,Level,Check,Text")
         line("# SatPvt,utcTimeMillis,TimeNanos,Svid,ConstellationType,CarrierFrequencyHz,Flags,XEcefMeters,YEcefMeters,ZEcefMeters,UreMeters,VxEcefMps,VyEcefMps,VzEcefMps,HardwareCodeBiasMeters,TimeCorrectionMeters,ClockDriftMps,IonoDelayMeters,TropoDelayMeters,TimeOfClockSeconds,TimeOfEphemerisSeconds,IssueOfDataClock,IssueOfDataEphemeris,EphemerisSource")
     }
 
@@ -69,6 +72,16 @@ class RawRecorder(private val dir: File) {
         } catch (e: java.io.IOException) {
             stop()
         }
+    }
+
+    /** TPS's warning when it changes (level or check), so a recording shows what the screen did. */
+    fun integrity(report: IntegrityReport) {
+        if (writer == null) return
+        val h = report.headline
+        val key = "${report.level}|${h?.check}"
+        if (key == lastIntegrity) return
+        lastIntegrity = key
+        line(listOf("Integrity", System.currentTimeMillis().toString(), report.level.name, h?.check?.title.orEmpty(), h?.text.orEmpty().replace(',', ';')).joinToString(","))
     }
 
     /** [epoch] is the same event as TPS read it, for the chip's satellite positions. */

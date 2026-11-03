@@ -169,6 +169,29 @@ class IntegrityTest {
     }
 
     @Test
+    fun aOneRoundGainBlipDoesntMakeABlockedSkyJamming() {
+        // Kara's Sony: gain steady within ±0.7 dB, with single-round dips near 3 dB. One lands
+        // just as the signals drop indoors.
+        val w = watch(Sky(
+            cn0 = { t, _, el, r -> 22 + 18 * kotlin.math.sin(Math.toRadians(el)) + 2 * r.nextGaussian() - if (t >= ATTACK) 15 else 0 },
+            agcDb = { t -> if (t == ATTACK + 2) -1.0 else 3.0 },
+        ))
+        assertEquals(null, w.first(Check.SIGNALS, Severity.ALERT))
+        assertTrue((ATTACK until ATTACK + 15).any { w.result(it, Check.SIGNALS).text.contains("sky got blocked") })
+    }
+
+    @Test
+    fun jammingWhoseGainLagsARoundIsStillAnAlert() {
+        val w = watch(Sky(
+            cn0 = { t, _, el, r -> 22 + 18 * kotlin.math.sin(Math.toRadians(el)) + 2 * r.nextGaussian() - if (t >= ATTACK) 15 else 0 },
+            agcDb = { t -> if (t >= ATTACK + 1) -8.0 else 3.0 },
+        ))
+        val at = w.first(Check.SIGNALS, Severity.ALERT)
+        assertNotNull("no alert", at)
+        assertTrue("caught at $at", at!! <= ATTACK + 4)
+    }
+
+    @Test
     fun aLongDropWithoutGainBecomesTheNewNormal() {
         // Indoors for good: a caution at first, not for as long as the phone stays there.
         val w = watch(Sky(cn0 = { t, _, el, r -> 22 + 18 * kotlin.math.sin(Math.toRadians(el)) + 2 * r.nextGaussian() - if (t >= ATTACK) 15 else 0 }), 180)

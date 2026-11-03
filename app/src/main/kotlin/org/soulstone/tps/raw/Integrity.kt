@@ -122,8 +122,8 @@ class IntegrityMonitor {
     private val agcSeen = HashMap<Pair<Constellation, Long>, Int>()
     private var gainRounds = 0
     private var agcEver = false
-    /** This round's largest gain change from its baseline (either sign), dB; null without a settled AGC. */
-    private var gainChange: Double? = null
+    /** The last rounds' largest gain change from its baseline (either sign), dB; null without a settled AGC. */
+    private val gainHistory = ArrayDeque<Double?>()
     private var blockedUntil = Double.NaN
     private var blockedText = ""
 
@@ -143,7 +143,7 @@ class IntegrityMonitor {
         latched.clear(); okText.clear(); lastS = Double.NaN
         baseCn0 = Double.NaN; baseCount = Double.NaN; baseBySystem.clear(); baselineRounds = 0
         dropRounds = 0; riseRounds = 0; uniformRounds = 0; strongRounds = 0
-        agcBase.clear(); agcSeen.clear(); gainRounds = 0; agcEver = false; gainChange = null; blockedUntil = Double.NaN
+        agcBase.clear(); agcSeen.clear(); gainRounds = 0; agcEver = false; gainHistory.clear(); blockedUntil = Double.NaN
         remembered = null; startupChecked = false
         systemRounds.clear(); fitRounds = 0; chipRounds = 0; seenRestarts = 0; seenClockJumps = 0
         timeBase = null; timeFirst.clear(); lastChip = null
@@ -210,11 +210,12 @@ class IntegrityMonitor {
             val everySystemRose = bySystem.isNotEmpty() && baseBySystem.all { (c, b) -> bySystem[c]?.let { it >= b + SYSTEM_RISE_DB } ?: false }
             riseRounds = if (!median.isNaN() && rise >= RISE_DB && everySystemRose) riseRounds + 1 else 0
             // The receiver gain's verdict, when the chip reports it: moved, steady, or unknown.
-            val shifted = gainChange?.let { abs(it) >= GAIN_CORROBORATE_DB }
+            val shifted = gainVerdict()
+            val gainMoved = gainHistory.filterNotNull().maxByOrNull { abs(it) } ?: 0.0
             if (dropRounds >= PERSIST_ROUNDS) {
                 val how = if (median.isNaN()) "Every signal is gone" else "Signals dropped %.0f dB on every system at once".format(drop)
                 when (shifted) {
-                    true -> raise(Check.SIGNALS, Severity.ALERT, Threat.JAMMING, "$how and the receiver gain moved %+.0f dB: interference in the band.".format(gainChange), now)
+                    true -> raise(Check.SIGNALS, Severity.ALERT, Threat.JAMMING, "$how and the receiver gain moved %+.0f dB: interference in the band.".format(gainMoved), now)
                     // Steady gain: no extra power in the band, so the sky got blocked.
                     false -> {
                         blockedUntil = now + CAUTION_HOLD_S
@@ -228,7 +229,7 @@ class IntegrityMonitor {
                 when {
                     shifted == true -> raise(
                         Check.SIGNALS, Severity.ALERT, Threat.SPOOFING,
-                        "Every signal got %.0f dB stronger and the receiver gain moved %+.0f dB: a transmitter overpowering the satellites.".format(rise, gainChange), now,
+                        "Every signal got %.0f dB stronger and the receiver gain moved %+.0f dB: a transmitter overpowering the satellites.".format(rise, gainMoved), now,
                     )
                     // Only a rise to levels phones don't get from orbit says a transmitter outshines the sky.
                     median >= RISE_LEVEL_DB -> raise(
@@ -286,6 +287,21 @@ class IntegrityMonitor {
         }
     }
 
+    /**
+     * Moved: 2 of the last 3 rounds off by [GAIN_CORROBORATE_DB]. Steady: all 3 within it.
+     * Anything else, or a round without gain, is unknown. On Kara's Sony the gain wanders
+     * ±0.7 dB, with single-round dips near 3 dB, so one round must not decide either way.
+     */
+    private fun gainVerdict(): Boolean? {
+        if (gainHistory.size < GAIN_WINDOW || gainHistory.any { it == null }) return null
+        val off = gainHistory.count { abs(it!!) >= GAIN_CORROBORATE_DB }
+        return when {
+            off >= 2 -> true
+            off == 0 -> false
+            else -> null
+        }
+    }
+
     /** Takes the current signal levels as the new baseline. */
     private fun accept(median: Double, count: Int, bySystem: Map<Constellation, Double>, tracked: List<Pair<Constellation, Double>>) {
         if (median.isNaN()) return
@@ -300,8 +316,8 @@ class IntegrityMonitor {
     // ------------------------------------------------------------ receiver gain (AGC)
 
     private fun gain(input: IntegrityInput, now: Double) {
-        gainChange = null
         if (input.agc.isEmpty()) {
+            recordGain(null)
             okText[Check.GAIN] = if (agcEver) "not reported this round" else "not reported by this chip"
             return
         }
@@ -323,7 +339,7 @@ class IntegrityMonitor {
             // The baseline follows slow drift, not interference.
             if (abs(change) < GAIN_CHANGE_DB) agcBase[key] = base + (a.levelDb - base) * 0.02
         }
-        gainChange = biggest
+        recordGain(biggest)
         gainRounds = if (biggest != null && abs(biggest) >= GAIN_CHANGE_DB) gainRounds + 1 else 0
         if (gainRounds >= PERSIST_ROUNDS && band != null) {
             raise(
@@ -332,6 +348,11 @@ class IntegrityMonitor {
             )
         }
         okText[Check.GAIN] = if (band == null) "learning what's normal" else "steady (%+.1f dB from usual)".format(biggest)
+    }
+
+    private fun recordGain(change: Double?) {
+        gainHistory.addLast(change)
+        while (gainHistory.size > GAIN_WINDOW) gainHistory.removeFirst()
     }
 
     // ------------------------------------------------------------ the super position's evidence
@@ -566,6 +587,8 @@ class IntegrityMonitor {
         const val GAIN_CHANGE_DB = 6.0
         /** A gain change this big confirms a signal change as interference; smaller is steady. */
         const val GAIN_CORROBORATE_DB = 3.0
+        /** Rounds the gain's verdict looks back over. */
+        const val GAIN_WINDOW = 3
         /** A signal change lasting this many rounds becomes the new normal. */
         const val NEW_NORMAL_ROUNDS = 30
 

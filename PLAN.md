@@ -521,9 +521,11 @@ what else it could be, findings held 20 s (caution) or 30 s (alert) after their 
 - *position source* (alert, dev.7): Android marks the chip's fix as a mock location
   (another app supplies it). A mock fix also no longer starts or checks TPS's own position;
 - *signal strength*: every system's C/N0 down 10 dB at once (or half the satellites lost)
-  for 3 rounds. With the receiver gain reported: gain moved 3 dB or more, alert
-  (interference); gain steady, no warning (the sky got blocked: no extra power in the
-  band). Without it: caution, jamming or a blocked sky, and after 30 rounds the new level
+  for 3 rounds. With the receiver gain reported: gain off by 3 dB in 2 of the last 3
+  rounds, alert (interference); within 3 dB in all 3, no warning (the sky got blocked: no
+  extra power in the band); anything between, caution, as without gain (dev.8: on Kara's
+  Sony single-round dips reach 2.97 dB, so one round mustn't decide). Without gain:
+  caution, jamming or a blocked sky, and after 30 rounds the new level
   becomes normal (indoors now), so the caution lasts about a minute, not as long as the
   phone stays indoors; interference the gain confirms never becomes normal. Every signal
   up 6 dB at once: alert with the gain moved; else caution only at a median of 42 dB-Hz
@@ -532,7 +534,10 @@ what else it could be, findings held 20 s (caution) or 30 s (alert) after their 
 - *receiver gain* (when reported): 6 dB from its baseline, either way (phones disagree on
   the sign). Read from the API 33 list, or, when the chip leaves that empty, from the
   deprecated per-measurement field Android names as the fallback (grouped by band:
-  GLONASS's FDMA carriers share one);
+  GLONASS's FDMA carriers share one). Kara's Sony fills that field (dev.7 recording,
+  indoors): one value per system and band, shared by every satellite in it, steady to
+  ±0.7 dB over 5 minutes; GPS L1 about −64 dB and Galileo E1 about −68 dB on the same
+  frequency, so the key is system and band, not frequency alone;
 - *signal pattern*: 8+ signals within ±2 dB for 10 rounds, or a median above 48 dB-Hz;
 - *receiver clock*: a common jump of every pseudorange without a reported reset;
 - *measurements fit*: 30% of pseudoranges rejected for 5 rounds;
@@ -544,7 +549,9 @@ way, a blocked sky with steady gain, an overpowering or one-antenna transmitter,
 jump, a start 500 km from ten minutes ago, GNSS time 30 s off the phone's count, time
 running backwards across a reboot, network time 3 s and 8 s off, a mock location; a clean
 sky and a normal restart stay quiet) and on Kara's recordings (no false alarms). On an
-Android 14 emulator the start-up alert and the mock-location alert show end to end.
+Android 14 emulator the start-up alert and the mock-location alert show end to end. On
+Kara's indoor recording with real gain readings, a staged 10 dB drop with the gain steady
+raises nothing, and the same drop with the gain moved 8 dB raises the interference alert.
 Phones are not survey receivers: this catches crude spoofing and jamming, not a careful
 attacker.
 
@@ -559,7 +566,12 @@ for multipath get 2× noise (down-weighted, not dropped); the Sony never sets th
 pseudorange minus its integrated Doppler, pooled per system: `FusedFix.codeMinusDopplerMps`)
 reads within ±0.25 m/s on four recordings, so the Sony's Doppler needs no correction.
 Replays from the chip's fix, median / 95% / max: 4.2 / 6.4 / 7.3 m, 2.3 / 5.9 / 7.6 m and
-3.9 / 10.1 / 12.1 m (before: 3.9 / 7.7 / 9.2, 2.5 / 7.2 / 7.5, 5.4 / 9.7 / 14.0). Height
+3.9 / 10.1 / 12.1 m (before: 3.9 / 7.7 / 9.2, 2.5 / 7.2 / 7.5, 5.4 / 9.7 / 14.0). Indoors
+(dev.7 recording: 17–20 dB-Hz, usually 2 satellites a second) TPS settled on the rounds
+with 4 or more and showed its position for 114 of 274 s, 10 m from the chip's typically
+and 19 m at most, claiming ±21 m (the chip ±28 m). The replay test now checks, for every
+recording, that whatever TPS shows stays within twice its own and the chip's combined
+claims (it held in every round of all six recordings). Height
 moved by a few metres, within its noise; it is still the weak part. Without ground truth
 these are distances from the chip, not errors.
 
@@ -568,7 +580,8 @@ these are distances from the chip, not errors.
 the system's "Save as" picker on Android 8–9). TPS adds `SatPvt`
 lines, the chip's satellite positions, which GnssLogger doesn't record; the receiver gain
 (the per-measurement `AgcDb` column on every Android version, the API 33 list as `Agc`
-lines); and a note when full tracking turns on or off (Android 14+). It's how the
+lines); a note when full tracking turns on or off (Android 14+); and `Integrity` lines
+when TPS's warning changes, so a recording shows what the screen said. It's how the
 decoders get checked against real phones. The file contains your position, and TPS says so.
 
 ## Sources
