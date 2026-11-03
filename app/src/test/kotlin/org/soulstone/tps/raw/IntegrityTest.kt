@@ -113,6 +113,40 @@ class IntegrityTest {
     }
 
     @Test
+    fun aFastTrainOutOfATunnelIsNoJump() {
+        // 80 m/s (290 km/h) east through a 40-s tunnel: no signals and no chip fix meanwhile. It
+        // comes out 3.2 km on, where it was heading: no jump, from TPS's position or the chip's.
+        val tunnel = 60 until 100
+        val w = watch(
+            Sky(path = Path { t -> 80.0 * t to 0.0 }, keep = { t, _, _ -> t !in tunnel }), 150,
+            input = { k, i -> if (k in tunnel) i.copy(chip = null) else i.copy(chipSpeedMps = 80.0, chipBearingDeg = 90.0) },
+        )
+        val raised = w.reports.withIndex().filter { it.value.level == Severity.ALERT }
+        assertTrue("raised ${raised.firstOrNull()?.let { "at ${it.index}: ${it.value.headline?.text}" }}", raised.isEmpty())
+        val (f, truth) = w.fixes.last()
+        assertTrue(Solver.offset(Geo.toGeodetic(truth), f!!.ecef).let { hypot(it[0], it[1]) } < 10.0)
+    }
+
+    @Test
+    fun aJumpInATunnelIsStillCaught() {
+        // The same train, but out of the tunnel the signals are timed for 5 km north of the line.
+        val tunnel = 60 until 100
+        val w = watch(
+            Sky(path = Path { t -> 80.0 * t to 0.0 }, keep = { t, _, _ -> t !in tunnel }, spoof = { t, _ -> if (t >= 100) 0.0 to 5_000.0 else null }), 150,
+            input = { k, i -> if (k in tunnel) i.copy(chip = null) else i.copy(chipSpeedMps = 80.0, chipBearingDeg = 90.0) },
+        )
+        val at = w.first(Check.JUMPS, Severity.ALERT)
+        assertNotNull("not caught", at)
+        assertTrue("caught at $at", at!! <= 102)
+        assertTrue(w.result(at, Check.JUMPS).text, w.result(at, Check.JUMPS).text.contains("farther than it could have gone"))
+        // TPS holds instead of taking the false place, until it could have got there; then a caution stays.
+        val released = w.first(Check.JUMPS, Severity.CAUTION, from = at)
+        assertNotNull("no release", released)
+        assertTrue(w.result(released!!, Check.JUMPS).text, w.result(released, Check.JUMPS).text.contains("it may be false"))
+        assertTrue(w.fixes.subList(at, released).none { (f, _) -> f?.usable == true })
+    }
+
+    @Test
     fun aTakeoverAtRestIsHeldOffForAsLongAsItLasts() {
         val w = watch(Sky(spoof = { t, _ -> if (t >= ATTACK) 5_000.0 to 0.0 else null }), 180, motion = { Motion.STILL })
         val at = w.first(Check.MOTION, Severity.ALERT)

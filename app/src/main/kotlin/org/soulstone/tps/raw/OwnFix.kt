@@ -43,6 +43,8 @@ data class OwnFixReport(
     val chipOrbitSources: Map<Int, Int> = emptyMap(),
     /** The super position: every satellite, one clock, filtered over time. */
     val fused: FusedFix? = null,
+    /** The chip's fix at this round's moment, which TPS's own positions are measured from. */
+    val chip: Geodetic? = null,
 )
 
 /**
@@ -170,6 +172,7 @@ class OwnFixEngine {
             chipOrbitsDropped = chipDropped,
             chipOrbitSources = chipSources,
             fused = fused,
+            chip = chip,
         )
     }
 

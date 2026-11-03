@@ -57,6 +57,9 @@ data class IntegrityInput(
     val fused: FusedFix? = null,
     val chip: Geodetic? = null,
     val chipAccuracyM: Double? = null,
+    /** The chip's own speed and bearing: where it was heading, should its fixes stop for a while. */
+    val chipSpeedMps: Double? = null,
+    val chipBearingDeg: Double? = null,
     /** GNSS time minus the phone's monotonic clock at the measurement, ms: constant unless GNSS time jumps. */
     val gnssMinusElapsedMs: Long? = null,
     /** GNSS time minus Android's network (NTP) time, ms; null when Android has none. */
@@ -144,7 +147,9 @@ class IntegrityMonitor {
     private var seenClockJumps = 0
     private var timeBase: Long? = null
     private val timeFirst = ArrayList<Long>()
-    private var lastChip: Pair<Double, Geodetic>? = null
+    /** The chip's last fix: when, where, and its speed and bearing then. */
+    private class ChipSeen(val t: Double, val at: Geodetic, val speedMps: Double?, val bearingDeg: Double?)
+    private var lastChip: ChipSeen? = null
 
     fun reset() {
         latched.clear(); okText.clear(); lastS = Double.NaN
@@ -423,14 +428,21 @@ class IntegrityMonitor {
         }
         val chip = input.chip
         if (chip != null) {
-            lastChip?.let { (t, before) ->
-                val gap = now - t
-                val move = Solver.offset(before, Geo.toEcef(chip)).let { hypot(it[0], it[1]) }
+            lastChip?.let { seen ->
+                val gap = now - seen.t
+                // From where it was heading: a fast train comes out of a tunnel kilometres on.
+                val heading = if (seen.speedMps != null && seen.bearingDeg != null && gap > 0) {
+                    val b = Math.toRadians(seen.bearingDeg)
+                    Geo.moved(seen.at, seen.speedMps * gap * kotlin.math.sin(b), seen.speedMps * gap * kotlin.math.cos(b))
+                } else {
+                    seen.at
+                }
+                val move = Solver.offset(heading, Geo.toEcef(chip)).let { hypot(it[0], it[1]) }
                 if (gap in 0.0..JUMP_WINDOW_S && move > CHIP_JUMP_FLOOR_M + GROUND_SPEED_MPS * gap) {
                     raise(Check.JUMPS, Severity.ALERT, Threat.SPOOFING, "The chip's position jumped ${distance(move)} in %.0f s, faster than anything on the ground.".format(max(gap, 1.0)), now)
                 }
             }
-            lastChip = now to chip
+            lastChip = ChipSeen(now, chip, input.chipSpeedMps, input.chipBearingDeg)
         }
         okText[Check.JUMPS] = "none"
     }
@@ -455,6 +467,7 @@ class IntegrityMonitor {
         okText[Check.MOTION] = when (input.motion) {
             Motion.UNKNOWN -> "motion sensors not reporting"
             Motion.STILL -> if (f?.still == true) "phone at rest; TPS's position held still" else "phone at rest"
+            Motion.QUIET -> if (f?.still == true) "phone steady; TPS's position held still" else "phone steady"
             Motion.MOVING -> "phone moving"
         }
     }

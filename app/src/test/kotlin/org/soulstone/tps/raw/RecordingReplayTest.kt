@@ -24,7 +24,13 @@ class RecordingReplayTest {
 
     private class Moment(val epoch: RawEpoch, val utcMs: Long, val elapsedMs: Long?, val wallMs: Long?)
 
-    private class ChipFix(val utcMs: Long, val at: Geodetic, val accuracyM: Double?, val elapsedMs: Long?)
+    /** A shown round, for the stops: the chip's speed, TPS's position and the chip's. */
+    private class Shown(val index: Int, val chipSpeedMps: Double?, val tps: Ecef, val chip: Geodetic)
+
+    private class ChipFix(
+        val utcMs: Long, val at: Geodetic, val accuracyM: Double?, val elapsedMs: Long?,
+        val speedMps: Double? = null, val bearingDeg: Double? = null,
+    )
 
     private fun columns(header: String) = header.removePrefix("# ").split(",").drop(1).withIndex().associate { it.value to it.index }
 
@@ -70,11 +76,16 @@ class RecordingReplayTest {
                         ),
                         values[h.getValue("AccuracyMeters")].toDoubleOrNull(),
                         values[h.getValue("elapsedRealtimeNanos")].toLongOrNull()?.div(1_000_000),
+                        values[h.getValue("SpeedMps")].toDoubleOrNull(),
+                        values[h.getValue("BearingDegrees")].toDoubleOrNull(),
                     )
                 }
                 "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
                 "Integrity" -> phoneIntegrity += values
-                "Motion" -> motionLines[values[0].toLong()] = runCatching { Motion.valueOf(values[1]) }.getOrDefault(Motion.UNKNOWN)
+                // From the figures when the line has them, so today's thresholds judge older recordings too.
+                "Motion" -> motionLines[values[0].toLong()] = values.getOrNull(2)?.toDoubleOrNull()
+                    ?.let { sd -> MotionDetector.classify(sd, values.getOrNull(3)?.toDoubleOrNull()) }
+                    ?: runCatching { Motion.valueOf(values[1]) }.getOrDefault(Motion.UNKNOWN)
                 "Baro" -> values[1].toDoubleOrNull()?.let { baroLines[values[0].toLong()] = it }
                 "Agc" -> agcLines.getOrPut(values[0].toLong()) { ArrayList() } +=
                     Agc(Constellation.fromAndroid(values[1].toInt()), values[2].toDouble().toLong(), values[3].toDouble())
@@ -155,6 +166,10 @@ class RecordingReplayTest {
         val rateNis = ArrayList<Double>()
         // Per shown round: whether TPS's distance from the chip is within twice their combined claims.
         val withinClaims = ArrayList<Boolean>()
+        val shown = ArrayList<Shown>()
+        // Each height minus the barometer's (standard atmosphere): how much each wanders.
+        val tpsMinusBaro = ArrayList<Double>()
+        val chipMinusBaro = ArrayList<Double>()
         val monitor = IntegrityMonitor()
         val findings = LinkedHashSet<String>()
         var worst = Severity.OK
@@ -164,6 +179,7 @@ class RecordingReplayTest {
         var atRest = 0
         var firstUsable: Int? = null
         val chipClaims = ArrayList<Double>()
+        val chipLeads = ArrayList<Double>()
         val motionSeen = HashMap<Motion, Int>()
         for ((index, m) in moments.withIndex()) {
             // What the motion sensors said at this round (the last verdict at or before it).
@@ -172,7 +188,9 @@ class RecordingReplayTest {
             // The barometer's reading at this round, if it's recent.
             val pressure = m.wallMs?.let { w -> baroLines.headMap(w + 1).entries.lastOrNull()?.takeIf { w - it.key <= 2_000 }?.value }
             val nearest = fixes.minByOrNull { kotlin.math.abs(it.utcMs - m.utcMs) }?.takeIf { kotlin.math.abs(it.utcMs - m.utcMs) <= 600 }
-            val chip = nearest?.at
+            // Where the chip's fix puts the phone at the measurements' moment, as the app has it.
+            val chip = nearest?.let { Geo.along(it.at, it.utcMs, it.speedMps, it.bearingDeg, m.utcMs) }
+            nearest?.let { chipLeads += (m.utcMs - it.utcMs) / 1_000.0 }
             val statusRows = status.headMap(m.utcMs + 1).entries.lastOrNull()?.value
             // The chip's sky at that moment, for the orbit check.
             val sky = statusRows?.let { rows ->
@@ -201,6 +219,8 @@ class RecordingReplayTest {
                     fused = report.fused,
                     chip = chip,
                     chipAccuracyM = nearest?.accuracyM,
+                    chipSpeedMps = nearest?.speedMps,
+                    chipBearingDeg = nearest?.bearingDeg,
                     // Time from the chip's fix, as the app does.
                     gnssMinusElapsedMs = nearest?.elapsedMs?.let { nearest.utcMs - it },
                     gnssMinusWallMs = nearest?.elapsedMs?.let { fe ->
@@ -227,6 +247,11 @@ class RecordingReplayTest {
                 climb += abs(f.velocityUp)
                 claimed += f.horizontalAccuracyM
                 withinClaims += hypot(e[0], e[1]) <= 2 * hypot(f.horizontalAccuracyM, nearest?.accuracyM ?: 0.0)
+                shown += Shown(index, nearest?.speedMps, f.ecef, chip)
+                pressure?.let { Barometer.altitude(it) }?.let { b ->
+                    tpsMinusBaro += f.position.height - b
+                    chipMinusBaro += chip.height - b
+                }
                 f.rangeNis?.let { nis += it }
                 f.rangeNisBySystem.forEach { (c, v) -> nisBySystem.getOrPut(c) { ArrayList() } += v }
                 f.rateNis?.let { rateNis += it }
@@ -238,6 +263,7 @@ class RecordingReplayTest {
             return "median %.1f m, 95%% %.1f m, max %.1f m (n=%d)".format(s[s.size / 2], s[(s.size * 0.95).toInt().coerceAtMost(s.size - 1)], s.last(), s.size)
         }
         println("rounds ${moments.size}, super position usable in $usable, measurements rejected $rejected")
+        if (chipLeads.isNotEmpty()) println("the chip's fixes come %.2f s before the measurements (compared at the measurements' moment)".format(chipLeads.sorted()[chipLeads.size / 2]))
         println("snapshot, all systems: " + stats(snapshot))
         println("super position:        " + stats(fused))
         println("height, TPS minus chip: " + vertical.sorted().let { v -> if (v.isEmpty()) "none" else "median %+.1f m, range %+.1f to %+.1f m".format(v[v.size / 2], v.first(), v.last()) })
@@ -263,6 +289,33 @@ class RecordingReplayTest {
             })
         }
         println("TPS within twice its and the chip's combined claims: ${withinClaims.count { it }} of ${withinClaims.size} rounds shown")
+        // Stops: the chip under 0.3 m/s for 8 shown rounds in a row, once TPS has settled (30 s
+        // after its first position). How far each wandered meanwhile.
+        val stops = ArrayList<List<Shown>>()
+        var run = ArrayList<Shown>()
+        for (r in shown) {
+            val stopped = (r.chipSpeedMps ?: Double.MAX_VALUE) < 0.3 && r.index >= (firstUsable ?: 0) + 30
+            if (stopped && run.isNotEmpty() && r.index == run.last().index + 1) {
+                run += r
+            } else {
+                if (run.size >= 8) stops += run
+                run = if (stopped) arrayListOf(r) else ArrayList()
+            }
+        }
+        if (run.size >= 8) stops += run
+        if (stops.isNotEmpty()) {
+            fun wander(s: List<Shown>, of: (Shown) -> Ecef) = s.maxOf { r -> Solver.offset(Geo.toGeodetic(of(s.first())), of(r)).let { hypot(it[0], it[1]) } }
+            val tpsWander = stops.map { s -> wander(s) { it.tps } }.sorted()
+            val chipWander = stops.map { s -> wander(s) { Geo.toEcef(it.chip) } }.sorted()
+            println(
+                "stops (the chip under 0.3 m/s for 8 s or more, TPS settled): %d, %d s; TPS wandered up to %.1f m (median of stops; worst %.1f m), the chip %.1f m"
+                    .format(stops.size, stops.sumOf { it.size }, tpsWander[tpsWander.size / 2], tpsWander.last(), chipWander[chipWander.size / 2])
+            )
+        }
+        if (tpsMinusBaro.size > 30) {
+            fun sd(v: List<Double>) = v.average().let { m -> kotlin.math.sqrt(v.sumOf { (it - m) * (it - m) } / v.size) }
+            println("height against the barometer (wander about its own mean): TPS sd %.1f m, the chip sd %.1f m".format(sd(tpsMinusBaro), sd(chipMinusBaro)))
+        }
         // A normal outing: no warning should have shown.
         assertTrue("false alarm: $findings", worst == Severity.OK)
         // Whatever TPS shows, outdoors or in, must keep within what it claims.

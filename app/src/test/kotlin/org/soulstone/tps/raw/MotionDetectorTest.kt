@@ -49,19 +49,35 @@ class MotionDetectorTest {
     }
 
     @Test
-    fun aSmoothPullAwayIsMovingWhileItBuilds() {
-        // 0.3 m/s² building up along x over a second: gravity's size hardly changes (+0.005), its direction does.
+    fun aSmoothPullAwayIsNotStillWhileItBuilds() {
+        // 0.3 m/s² building up along x over a second: gravity's size hardly changes (+0.005), its
+        // direction does. Quiet, not still: no resting place, and the signals decide the speed.
         val d = MotionDetector()
         feed(d, 2.0, accel = table, rotation = quietGyro)
         val now = feed(d, 1.0, from = 2.0, accel = { t -> doubleArrayOf(0.3 * (t - 2.0) + noise(0.005), noise(0.005), 9.81 + noise(0.005)) }, rotation = quietGyro)
-        assertEquals(Motion.MOVING, d.reading(now).motion)
+        assertEquals(Motion.QUIET, d.reading(now).motion)
+        // Harder, 1.5 m/s²: moving.
+        val later = feed(d, 1.0, from = 3.0, accel = { t -> doubleArrayOf(1.5 * (t - 3.0) + noise(0.005), noise(0.005), 9.81 + noise(0.005)) }, rotation = quietGyro)
+        assertEquals(Motion.MOVING, d.reading(later).motion)
     }
 
     @Test
-    fun aSlowTurnIsMoving() {
+    fun aSlowTurnIsNotStillAndAQuickOneIsMoving() {
         val d = MotionDetector()
         val now = feed(d, 3.0, accel = table, rotation = { doubleArrayOf(noise(0.001), noise(0.001), 0.05) })
-        assertEquals(Motion.MOVING, d.reading(now).motion)
+        assertEquals(Motion.QUIET, d.reading(now).motion)
+        val later = feed(d, 3.0, from = 3.0, accel = table, rotation = { doubleArrayOf(noise(0.001), noise(0.001), 0.2) })
+        assertEquals(Motion.MOVING, d.reading(later).motion)
+    }
+
+    @Test
+    fun aCarAtTheLightsIsQuietAndOnTheRoadMoving() {
+        // As in Kara's car: ~0.14 m/s² and 0.02 rad/s at a stop, ~0.8 m/s² and 0.14 rad/s driving.
+        val d = MotionDetector()
+        val idle = feed(d, 3.0, accel = { doubleArrayOf(noise(0.14), noise(0.14), 9.81 + noise(0.14)) }, rotation = { doubleArrayOf(noise(0.012), noise(0.012), noise(0.012)) })
+        assertEquals(Motion.QUIET, d.reading(idle).motion)
+        val road = feed(d, 3.0, from = 3.0, accel = { doubleArrayOf(noise(0.8), noise(0.8), 9.81 + noise(0.8)) }, rotation = { doubleArrayOf(noise(0.08), noise(0.08), noise(0.08)) })
+        assertEquals(Motion.MOVING, d.reading(road).motion)
     }
 
     @Test

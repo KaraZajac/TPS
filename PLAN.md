@@ -651,6 +651,59 @@ them it claims ±1–2 m while 10 m off).
   "baro"; recordings get `Baro` lines and the replay test feeds them back. Whether Kara's Sony
   has a barometer, the CHIP card will say.
 
+**Driving (0.3.0-dev.11).** From Kara's first recording in a car (dev.10, a 15-minute commute,
+26 dB-Hz, up to 27 m/s, three stops at lights):
+- *Compared at one moment*: the Snapdragon takes its raw measurements 0.42 s after each whole
+  second and its fix on the second (0.41–0.43 s in every recording so far). Everything that
+  measured TPS against the chip (OWN FIXES, the constellations sheet's "chip's fix", the TPS
+  vs chip check, the replay test) compared positions 0.42 s apart: 8 m at 70 km/h. The chip's
+  fix is now moved along its own speed and bearing to the measurements' moment (`Geo.along`,
+  at most 5 s, the stale-fix limit). On the drive TPS went from 7.0 m off the chip typically
+  to 3.1 m (95% 7.4 m); the walking recordings are unchanged.
+- The drive otherwise: speed within 0.4 m/s of the chip's (sd), no lag braking or speeding up
+  (along the road −0.6 to −1.4 m), within twice the combined claims in all 892 rounds shown,
+  no warning, no hold. Huber weighs about 13% of measurements less, what Gaussian noise gives
+  at k = 1.5.
+- *Barometer, first real data*: the Sony has one. Over the drive the pressure covered 6.25 hPa,
+  52.0 m of standard-atmosphere height, against 51.4 m in the chip's height; height changes
+  over 10/30/60 s correlate 0.89/0.93/0.94 with the chip's, slope 0.98/1.00/1.02; noise
+  around a 9-s mean 0.29 m (the model says 0.3 m). Barometer minus chip drifted 3.7 m in the
+  15 minutes (weather, or the cabin).
+- *Height*: TPS's GNSS height sat about 10 m above the chip's throughout (−2 to +18 m), and its
+  barometer height with it, since that takes its offset from TPS's own. Against the barometer
+  TPS's GNSS height wanders more than the chip's (sd 4.5 against 3.0 m). Earlier recordings
+  ranged from 26 m below to 9 m above, so it's no fixed offset (not a datum mix-up). Which is
+  right needs a known height.
+- *Quiet*: a motion state between still and moving, under 0.3 m/s² and 0.06 rad/s (Kara's car
+  at a stop 0.14 m/s² and 0.02 rad/s, driving 0.84 and 0.14, the phone on a table 0.012 and
+  0.002). Quiet, with the signals under 0.5 m/s, the velocity is held at zero as at rest, but
+  with no resting place: a quiet phone may be gliding along. At the drive's three stops (80 s)
+  TPS wandered up to 5.9 m (7.2 m before; the chip 1.2 m), 95% from the chip 7.4 → 6.8 m; the
+  bedroom recording moved within its noise (7.4 → 8.5 m from a chip claiming ±13 m indoors).
+- Tried and dropped: counting each second's pseudoranges for less at rest, since their errors
+  repeat. The stops came down to 3.9 m, but a cold start at rest settled far later (the
+  bedroom recording shown in 34 of 160 s instead of 125).
+- Standing still, the chip's position is far steadier than TPS's (after settling, TPS wanders
+  3–13 m outdoors where the chip moves 0.4–4 m): it evidently freezes its position at rest,
+  where TPS only holds its velocity. Next to tune.
+- *Jumps measured from where it was heading*: "faster than anything on the ground" (50 m/s)
+  was measured from the last position, so a 290 km/h train out of a 40-s tunnel 3.2 km on, or
+  a car at 200 km/h, read as a jump. TPS's restarts and the chip's fixes are now measured from
+  the last position carried on at its ground speed (the chip's own speed and bearing for it).
+- *Back from a loss, within reach*: after a loss of signal longer than the 30-s hold, TPS
+  restarted wherever the signals then said, so jamming for half a minute and then spoofing
+  moved it with no warning (the code meant "never shown" but asked "not shown now"). Now, if
+  nothing has moved the filter since its position was last shown, the signals' own fix must
+  be within reach of where it was heading (100 m + 3σ + 50 m/s per moving second), or TPS
+  holds with the out-of-reach alert like any other hold. With too few satellites for that fix
+  the round goes ahead as before (indoors), and after a loss of more than 5 minutes (a flight,
+  an underground ride) the check is off. Synthetic: the spoofed tunnel exit is caught at
+  once and held until the place could have been reached (16 s), then followed with the
+  caution; the honest train triggers nothing.
+- The replay test also prints the time between the chip's fixes and the measurements, the
+  wander at the chip's stops (once TPS has settled), and each height's wander against the
+  barometer.
+
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;
 the system's "Save as" picker on Android 8–9). TPS adds `SatPvt`

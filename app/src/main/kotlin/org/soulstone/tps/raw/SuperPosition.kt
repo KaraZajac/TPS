@@ -42,7 +42,10 @@ data class FusedFix(
     /** Jumps of the whole clock taken up (no hardware reset reported), and the latest one's size, metres. */
     val clockJumps: Int = 0,
     val lastClockJumpM: Double = 0.0,
-    /** Restarts from a fresh snapshot fix; for the latest, how far the position moved and after how long without data. */
+    /**
+     * Restarts from a fresh snapshot fix; for the latest, how far the position moved from where
+     * it was heading (its last position carried on at its ground speed), after how long without data.
+     */
     val restarts: Int = 0,
     val lastRestartMoveM: Double? = null,
     val lastRestartGapS: Double? = null,
@@ -155,6 +158,10 @@ class SuperPosition(private val robust: Boolean = true) {
     private var lastRejected = 0
     private var smoothedSpeed = 0.0
     private var trusted = false
+    /** TPS's position has been on screen since the filter last began from nothing. */
+    private var shown = false
+    /** The last update before that, while it was on screen: none since means nothing has moved it. */
+    private var lastShownUpdateT = 0.0
     private var startedFromChip = false
     private var hadState = false
     private var clockJumps = 0
@@ -232,7 +239,10 @@ class SuperPosition(private val robust: Boolean = true) {
         // A long gap without measurements: nothing vouches the phone stayed put, so the resting
         // place goes; and the filter restarts, unless it's holding against suspect signals.
         if (initialized && t - lastT > MAX_GAP_S) anchor = null
-        if (initialized && (t < lastT || (t - lastT > MAX_GAP_S && suspect == null))) initialized = false
+        if (initialized && (t < lastT || (t - lastT > MAX_GAP_S && suspect == null))) {
+            initialized = false
+            shown = false
+        }
         // Started cold from a snapshot, and the chip now has a decent fix: start again from that,
         // once, before anything was shown. Not a restart: no position of TPS's was ever on screen.
         if (initialized && !trusted && !startedFromChip && fullBias != null && start != null &&
@@ -243,8 +253,9 @@ class SuperPosition(private val robust: Boolean = true) {
         }
         if (!initialized) {
             if (fullBias == null) return null
-            // Only a restart after TPS's position was on screen can show as a jump.
-            val previous = if (hadState && trusted) Ecef(x[0], x[1], x[2]) else null
+            // Only a restart after TPS's position was on screen can show as a jump: measured from
+            // where it was heading, as a fast train comes out of a tunnel kilometres on.
+            val previous = if (hadState && trusted) headingOn(t - lastT) else null
             val gap = t - lastUpdateT
             initialized = initialize(t, clock, fullBias, observations, start, klobuchar, gpsSeconds, startAccuracyM)
             if (initialized && previous != null) {
@@ -261,6 +272,7 @@ class SuperPosition(private val robust: Boolean = true) {
             if (clock.discontinuityCount != discontinuity) resetClock(clock, fullBias)
             // The chip's correction of its own clock since the reference, put back into the pseudoranges.
             val steer = ((fullBias - refFullBias) + (clock.biasNanos - refBias)) * 1e-9 * Pseudoranges.C
+            if (backOutOfReach(t, observations, klobuchar, gpsSeconds)) return output()
             update(t, observations, steer, klobuchar, gpsSeconds)
         }
         if (wantRestart) {
@@ -274,6 +286,7 @@ class SuperPosition(private val robust: Boolean = true) {
         if (x.any { it.isNaN() || it.isInfinite() }) {
             initialized = false
             hadState = false
+            shown = false
         }
         return output()
     }
@@ -771,6 +784,25 @@ class SuperPosition(private val robust: Boolean = true) {
     }
 
     /**
+     * Back from a loss of signal that outlasted TPS's hold, with nothing moving the filter since
+     * its position was last shown: the place the signals now give must be within [reach] of
+     * where it was heading, or TPS holds instead of following. Jamming every signal away for
+     * half a minute, then spoofing, is the classic way to move a receiver without a jump. With
+     * too few satellites for a fix of their own, the round goes ahead as before; and after more
+     * than [BACK_WITHIN_S] (a flight, an underground ride) where the phone may be is anyone's guess.
+     */
+    private fun backOutOfReach(t: Double, obs: List<Observation>, klobuchar: Klobuchar?, gpsSeconds: Double): Boolean {
+        if (!shown || trusted || suspect != null || anchor != null || lastUpdateT != lastShownUpdateT || obs.isEmpty()) return false
+        if (t - lastUpdateT > BACK_WITHIN_S) return false
+        val here = Ecef(x[0], x[1], x[2])
+        val there = snapshot(obs, here, klobuchar, gpsSeconds) ?: return false
+        val move = distance(here, there.ecef)
+        if (move <= reach()) return false
+        hold(Suspect.OUT_OF_REACH, move, t)
+        return true
+    }
+
+    /**
      * How far the phone could have gone from TPS's position: its uncertainty, a margin for a
      * weak snapshot, and 50 m/s for every second it may have been moving since the last good
      * update (none while the motion sensors say still).
@@ -839,12 +871,17 @@ class SuperPosition(private val robust: Boolean = true) {
     /**
      * Static mode: while the motion sensors say still, and the signals agree (barely moving) or
      * the phone came to rest with both agreeing, the velocity is held at zero. Not otherwise: on
-     * a smooth ride the sensors can feel still while the signals say 30 m/s.
+     * a smooth ride the sensors can feel still while the signals say 30 m/s. Quiet (held
+     * steadily, a vehicle at a stop) the same while the signals agree, with no resting place:
+     * a car at the lights shakes too much to be still, and its position mustn't wander either.
      */
     private fun zeroVelocity() {
         stillApplied = false
-        if (motion != Motion.STILL) return
-        if (anchor == null && horizontalSpeed() >= STILL_SIGNALS_MPS) return
+        when (motion) {
+            Motion.STILL -> if (anchor == null && horizontalSpeed() >= STILL_SIGNALS_MPS) return
+            Motion.QUIET -> if (horizontalSpeed() >= STILL_SIGNALS_MPS) return
+            else -> return
+        }
         for (axis in 3 until 6) {
             val ph = DoubleArray(N) { i -> p[i][axis] }
             val s = p[axis][axis] + ZUPT_SIGMA * ZUPT_SIGMA
@@ -887,6 +924,14 @@ class SuperPosition(private val robust: Boolean = true) {
         return sqrt(max(s, 0.0))
     }
 
+    /** Where the filter was heading: its position carried on at its ground speed for [dt] seconds. */
+    private fun headingOn(dt: Double): Ecef {
+        val up = localAxes(Geo.toGeodetic(Ecef(x[0], x[1], x[2])))[2]
+        val climb = x[3] * up[0] + x[4] * up[1] + x[5] * up[2]
+        val d = max(0.0, dt)
+        return Ecef(x[0] + (x[3] - climb * up[0]) * d, x[1] + (x[4] - climb * up[1]) * d, x[2] + (x[5] - climb * up[2]) * d)
+    }
+
     private fun horizontalSpeed(): Double {
         val v = Geo.enu(Geo.toGeodetic(Ecef(x[0], x[1], x[2])), Ecef(x[3], x[4], x[5]))
         return hypot(v[0], v[1])
@@ -918,6 +963,10 @@ class SuperPosition(private val robust: Boolean = true) {
             !trusted -> updates >= FusedFix.SETTLE_UPDATES && horizontal <= FusedFix.SETTLE_ACCURACY_M && since <= 2.5
             // Lying still, the position holds through a loss for as long as it stays good.
             else -> (since <= FusedFix.HOLD_S || anchor != null) && horizontal <= FusedFix.HOLD_ACCURACY_M
+        }
+        if (trusted && suspect == null) {
+            shown = true
+            lastShownUpdateT = lastUpdateT
         }
         // The barometer's height filter: TPS's height feeds it only while trusted and not held.
         val baro = baroHeight.step(lastT, pressureHpa, geo.height.takeIf { trusted && suspect == null }, vertical)
@@ -1018,6 +1067,7 @@ class SuperPosition(private val robust: Boolean = true) {
         /** A restart must land within this, plus 3σ, plus 50 m/s for each second the phone may have moved. */
         private const val REACH_FLOOR_M = 100.0
         private const val REACH_SPEED_MPS = 50.0
+        private const val BACK_WITHIN_S = 300.0
         /** Rounds of agreement that end a hold, and the most typical surprise (median NIS) that counts as agreeing. */
         private const val AGREE_ROUNDS = 3
         private const val AGREE_MEDIAN_NIS = 2.0

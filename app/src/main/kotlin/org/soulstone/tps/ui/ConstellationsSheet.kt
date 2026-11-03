@@ -44,6 +44,7 @@ import org.soulstone.tps.gnss.MarkShape
 import org.soulstone.tps.gnss.MslSource
 import org.soulstone.tps.gnss.SatState
 import org.soulstone.tps.gnss.Satellite
+import org.soulstone.tps.gnss.positionAt
 import org.soulstone.tps.nav.Geodesy
 import org.soulstone.tps.nav.Geohash
 import org.soulstone.tps.raw.Geo
@@ -343,9 +344,10 @@ private fun PositionCard(state: GnssEngine.State, prefs: DisplayPrefs) {
             // With TPS's own position on show, the chip's is the comparison.
             val chipFix = state.chipFix?.takeIf { state.fixSource == FixSource.TPS && state.chipFixValid }
             if (chipFix != null) {
+                // At the moment of TPS's fix: the chip's own comes a fraction of a second apart.
                 val d = Solver.offset(
                     Geodetic(fix.latitude, fix.longitude, fix.altitudeM ?: 0.0),
-                    Geo.toEcef(Geodetic(chipFix.latitude, chipFix.longitude, chipFix.altitudeM ?: fix.altitudeM ?: 0.0)),
+                    Geo.toEcef(chipFix.positionAt(fix.gnssTimeMs).let { if (chipFix.altitudeM == null) it.copy(height = fix.altitudeM ?: 0.0) else it }),
                 )
                 val bearing = (Math.toDegrees(kotlin.math.atan2(d[0], d[1])) + 360) % 360
                 KeyValue(

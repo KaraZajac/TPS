@@ -54,6 +54,37 @@ object Geo {
         return doubleArrayOf(e, n, u)
     }
 
+    /** [at] moved [east], [north] and [up] metres. */
+    fun moved(at: Geodetic, east: Double, north: Double, up: Double = 0.0): Geodetic {
+        val lat = Math.toRadians(at.latitude)
+        val lon = Math.toRadians(at.longitude)
+        val d = Ecef(
+            -sin(lon) * east - sin(lat) * cos(lon) * north + cos(lat) * cos(lon) * up,
+            cos(lon) * east - sin(lat) * sin(lon) * north + cos(lat) * sin(lon) * up,
+            cos(lat) * north + sin(lat) * up,
+        )
+        return toGeodetic(toEcef(at) + d)
+    }
+
+    /**
+     * Where a fix from [fixUtcMs], moving at [speedMps] towards [bearingDeg], puts the phone at
+     * [utcMs]. A chip takes its fixes and its raw measurements (so TPS's positions) at different
+     * moments: on a Snapdragon 8 Gen 1 the fix is on the second and the measurements 0.42 s
+     * later, which at 70 km/h is 8 m. So the two are compared at one moment. Not moved without
+     * a speed and a bearing, or when the times are over [MAX_ALONG_S] apart: then they're on
+     * different clocks (an emulator's raw clock), or the fix is too old to compare with.
+     */
+    fun along(at: Geodetic, fixUtcMs: Long, speedMps: Double?, bearingDeg: Double?, utcMs: Long?): Geodetic {
+        if (speedMps == null || bearingDeg == null || utcMs == null) return at
+        val dt = (utcMs - fixUtcMs) / 1_000.0
+        if (abs(dt) > MAX_ALONG_S || dt == 0.0) return at
+        val b = Math.toRadians(bearingDeg)
+        return moved(at, speedMps * dt * sin(b), speedMps * dt * cos(b))
+    }
+
+    /** As long as a fix stays current ([org.soulstone.tps.gnss.FixQuality.STALE_MS]). */
+    const val MAX_ALONG_S = 5.0
+
     /** Azimuth and elevation, radians, of [sat] seen from [at]. */
     fun azEl(at: Geodetic, receiver: Ecef, sat: Ecef): Pair<Double, Double> {
         val (e, n, u) = enu(at, sat - receiver).let { Triple(it[0], it[1], it[2]) }

@@ -10,6 +10,7 @@ import org.soulstone.tps.gnss.Constellation
 /** Earth-centred, Earth-fixed coordinates, metres. */
 data class Ecef(val x: Double, val y: Double, val z: Double) {
     operator fun minus(o: Ecef) = Ecef(x - o.x, y - o.y, z - o.z)
+    operator fun plus(o: Ecef) = Ecef(x + o.x, y + o.y, z + o.z)
     fun norm() = sqrt(x * x + y * y + z * z)
 }
 

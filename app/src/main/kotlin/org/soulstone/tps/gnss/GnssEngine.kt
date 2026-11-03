@@ -456,7 +456,8 @@ class GnssEngine private constructor(context: Context) {
                 // Own fixes are compared with, and checked against, the chip's fix: never TPS's own.
                 // A mock location (another app's) is neither a start nor a reference.
                 val chipFix = s.chipFix?.takeIf { s.chipFixValid && !it.mock }
-                val chip = chipFix?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
+                // Where it puts the phone at the measurements' moment: the chip takes the two apart.
+                val chip = chipFix?.positionAt(gnssUtcMs(epoch.clock))
                 val moving = motion.reading(SystemClock.elapsedRealtimeNanos())
                 recorder.motion(moving)
                 val pressure = barometer.reading(SystemClock.elapsedRealtimeNanos())
@@ -717,6 +718,8 @@ class GnssEngine private constructor(context: Context) {
             fused = fused,
             chip = chip,
             chipAccuracyM = s.chipFix?.accuracyM?.toDouble(),
+            chipSpeedMps = fix?.speedMps?.toDouble(),
+            chipBearingDeg = fix?.bearingDeg?.toDouble(),
             gnssMinusElapsedMs = gnssMs?.let { it - fix.elapsedRealtimeMs },
             gnssMinusNetworkMs = network,
             gnssMinusWallMs = gnssMs?.let { it - (System.currentTimeMillis() - ageMs) },

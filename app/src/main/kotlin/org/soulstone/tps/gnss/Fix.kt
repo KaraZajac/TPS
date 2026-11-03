@@ -1,5 +1,8 @@
 package org.soulstone.tps.gnss
 
+import org.soulstone.tps.raw.Geo
+import org.soulstone.tps.raw.Geodetic
+
 /** Where the height above sea level came from. */
 enum class MslSource {
     /** `Location.getMslAltitudeMeters()`, filled in by the platform (API 34+). */
@@ -37,6 +40,10 @@ data class Fix(
     val clockOffsetMs: Long? = null,
     val mock: Boolean = false,
 )
+
+/** Where this fix puts the phone at [utcMs] (a GNSS time), along its own speed and bearing: see [Geo.along]. */
+fun Fix.positionAt(utcMs: Long?): Geodetic =
+    Geo.along(Geodetic(latitude, longitude, altitudeM ?: 0.0), gnssTimeMs, speedMps?.toDouble(), bearingDeg?.toDouble(), utcMs)
 
 /** Who computed the position on screen: TPS itself (the super position), or the phone's GNSS chip. */
 enum class FixSource { TPS, CHIP }

@@ -138,8 +138,9 @@ private fun FusedRow(f: FusedFix?, offset: Offset3?, prefs: DisplayPrefs, measur
 internal fun OwnFixesCard(state: GnssEngine.State, prefs: DisplayPrefs, raw: RawUi) {
     val r = state.raw
     val report = r.report
-    // Everything here is measured from the chip's own fix, never from TPS's.
-    val chip = state.chipFix?.takeIf { state.chipFixValid }?.let { Geodetic(it.latitude, it.longitude, it.altitudeM ?: 0.0) }
+    // Everything here is measured from the chip's own fix, never from TPS's: where it puts the
+    // phone at the measurements' moment.
+    val chip = report?.chip
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
