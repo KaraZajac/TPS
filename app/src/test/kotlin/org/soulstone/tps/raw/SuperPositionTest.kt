@@ -217,6 +217,47 @@ class SuperPositionTest {
         assertTrue(r.drop(20).all { (f, t) -> horizontalError(f!!, t) < 3.0 })
     }
 
+    /** A fixed draw in [0, 1) for [key] (SplitMix64: neighbouring keys give unrelated draws). */
+    private fun uniform(key: Long): Double {
+        var z = key + -7046029254386353131L
+        z = (z xor (z ushr 30)) * -4658895280553007687L
+        z = (z xor (z ushr 27)) * -7723592293110705685L
+        z = z xor (z ushr 31)
+        return (z ushr 11) * (1.0 / (1L shl 53))
+    }
+
+    /**
+     * Kara's hand indoors: 22–26 dB-Hz, a handful of satellites a second, noisy code and Doppler,
+     * with the chip's own uncertainties as pessimistic as Kara's are (TPS takes 0.6 and 0.65 of them).
+     */
+    private fun weakSky(path: Path = Path { 0.0 to 0.0 }) = Sky(
+        path = path, codeNoise = 15.0, codeSigma = 25.0, rateNoise = 1.5, rateSigma = 2.3,
+        keep = { t, c, svid -> uniform(t * 1_000L + c.ordinal * 100L + svid) < 0.3 },
+        cn0 = { _, _, el, r -> 20 + 6 * sin(Math.toRadians(el)) + r.nextGaussian() },
+        seed = 7,
+    )
+
+    @Test
+    fun aHeldPhoneUnderAWeakSkyStaysWithinAFewMetres() {
+        // Static mode while the signals' own speed stays under 0.5 m/s; the position averages down.
+        val r = SyntheticSky.filter(weakSky(), 300, motion = { Motion.QUIET })
+        val err = r.drop(60).mapNotNull { (f, t) -> f?.let { horizontalError(it, t) } }.sorted()
+        assertTrue("95%% %.1f m, max %.1f m".format(err[err.size * 95 / 100], err.last()), err[err.size * 95 / 100] < 5.0 && err.last() < 7.0)
+    }
+
+    @Test
+    fun aSmoothRideOnWeakSignalsIsNotTakenForRest() {
+        // A smooth ride with the sensors feeling a held phone, however weak the signals: static
+        // mode must let go, or the position stays behind (tried: holding on whenever the Doppler
+        // couldn't prove motion left a 1 m/s ride 35 m behind, a 4 m/s one 80 m).
+        for (speed in listOf(15.0, 4.0, 1.0)) {
+            val r = SyntheticSky.filter(weakSky(Path { t -> speed * t to 0.0 }), 180, motion = { Motion.QUIET })
+            val static = r.drop(30).count { it.first?.still == true }
+            val err = r.drop(30).mapNotNull { (f, t) -> f?.let { horizontalError(it, t) } }.sorted()
+            assertTrue("$speed m/s: static in $static rounds, error median %.1f m".format(err[err.size / 2]), static <= 20 && err[err.size / 2] < 8.0)
+        }
+    }
+
     @Test
     fun atRestThePositionHoldsThroughALoss() {
         val loss = Sky(keep = { t, _, _ -> t < 60 || t >= 150 })

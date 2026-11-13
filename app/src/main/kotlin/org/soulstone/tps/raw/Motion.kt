@@ -91,3 +91,41 @@ class MotionDetector {
         const val QUIET_GYRO_RMS = 0.06
     }
 }
+
+/**
+ * Averages a sensor stream into fixed slots (40 ms: 25 a second), for recordings: half the
+ * size of the 50 Hz stream, and the average keeps vibration faster than the slots from folding
+ * back into the slow motion of steps and hands. [emit] gets each finished slot's mean time and
+ * values. Plain Kotlin; one thread feeds it.
+ */
+class SlotAverager(private val slotNs: Long = 40_000_000L, private val emit: (tNs: Long, x: Double, y: Double, z: Double) -> Unit) {
+    private var slot = Long.MIN_VALUE
+    private var n = 0
+    private var t = 0.0
+    private var x = 0.0
+    private var y = 0.0
+    private var z = 0.0
+
+    fun add(tNs: Long, x: Double, y: Double, z: Double) {
+        val s = Math.floorDiv(tNs, slotNs)
+        if (s != slot) {
+            flush()
+            slot = s
+        }
+        n++
+        t += (tNs - s * slotNs).toDouble()
+        this.x += x
+        this.y += y
+        this.z += z
+    }
+
+    /** Emits the slot in progress, if any (at the end of a recording). */
+    fun flush() {
+        if (n > 0) emit(slot * slotNs + (t / n).toLong(), x / n, y / n, z / n)
+        n = 0
+        t = 0.0
+        x = 0.0
+        y = 0.0
+        z = 0.0
+    }
+}

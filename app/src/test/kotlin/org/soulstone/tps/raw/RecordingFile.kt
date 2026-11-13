@@ -24,7 +24,19 @@ class RecordingFile private constructor(
     val hasSatellitePvt: Boolean,
     /** Where the receiver really was, by the round's TimeNanos: only in recordings made up by the reference model. */
     val truth: Map<Long, Truth>,
+    /** The figures behind each motion verdict as the phone recorded them: accelerometer sd, gyroscope rms (by wall time). */
+    val motionFigures: SortedMap<Long, Pair<Double?, Double?>> = sortedMapOf(),
+    /** The motion sensors themselves (dev.13 on), 25 a second, by the phone's monotonic clock. */
+    val accel: List<Sample> = emptyList(),
+    val gyro: List<Sample> = emptyList(),
+    /** The monotonic clock (ns) and UTC (ms) at one moment, to put the two side by side. */
+    val clockPair: Pair<Long, Long>? = null,
 ) {
+    class Sample(val tNs: Long, val x: Double, val y: Double, val z: Double)
+
+    /** [utcMs] on the monotonic clock, ns, if the recording pairs the two. */
+    fun elapsedNs(utcMs: Long): Long? = clockPair?.let { (ns, ms) -> ns + (utcMs - ms) * 1_000_000L }
+
     class Moment(val epoch: RawEpoch, val utcMs: Long, val elapsedMs: Long?, val wallMs: Long?)
 
     class ChipFix(
@@ -72,9 +84,19 @@ class RecordingFile private constructor(
             val agcLines = HashMap<Long, MutableList<Agc>>()
             val phoneIntegrity = ArrayList<List<String>>()
             val motionLines = sortedMapOf<Long, Motion>()
+            val motionFigures = sortedMapOf<Long, Pair<Double?, Double?>>()
+            val accel = ArrayList<Sample>()
+            val gyro = ArrayList<Sample>()
+            var clockPair: Pair<Long, Long>? = null
             val baroLines = sortedMapOf<Long, Double>()
             val truth = HashMap<Long, Truth>()
             lines.forEach { line ->
+                if (line.startsWith("# Clock: ")) {
+                    // "# Clock: elapsedRealtimeNanos <ns> at utcTimeMillis <ms>"
+                    val w = line.split(" ")
+                    clockPair = w.getOrNull(3)?.toLongOrNull()?.let { ns -> w.getOrNull(6)?.toLongOrNull()?.let { ms -> ns to ms } }
+                    return@forEach
+                }
                 if (line.startsWith("# ")) {
                     val kind = line.removePrefix("# ").substringBefore(",")
                     if (line.count { it == ',' } > 3) headers[kind] = columns(line)
@@ -105,9 +127,15 @@ class RecordingFile private constructor(
                     "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
                     "Integrity" -> phoneIntegrity += values
                     // From the figures when the line has them, so today's thresholds judge older recordings too.
-                    "Motion" -> motionLines[values[0].toLong()] = values.getOrNull(2)?.toDoubleOrNull()
-                        ?.let { sd -> MotionDetector.classify(sd, values.getOrNull(3)?.toDoubleOrNull()) }
-                        ?: runCatching { Motion.valueOf(values[1]) }.getOrDefault(Motion.UNKNOWN)
+                    "Motion" -> {
+                        motionLines[values[0].toLong()] = values.getOrNull(2)?.toDoubleOrNull()
+                            ?.let { sd -> MotionDetector.classify(sd, values.getOrNull(3)?.toDoubleOrNull()) }
+                            ?: runCatching { Motion.valueOf(values[1]) }.getOrDefault(Motion.UNKNOWN)
+                        motionFigures[values[0].toLong()] = values.getOrNull(2)?.toDoubleOrNull() to values.getOrNull(3)?.toDoubleOrNull()
+                    }
+                    "Accel", "Gyro" -> values.mapNotNull { it.toDoubleOrNull() }.takeIf { it.size >= 4 }?.let { v ->
+                        (if (f[0] == "Accel") accel else gyro) += Sample(values[0].toLong(), v[1], v[2], v[3])
+                    }
                     "Baro" -> values[1].toDoubleOrNull()?.let { baroLines[values[0].toLong()] = it }
                     "Agc" -> agcLines.getOrPut(values[0].toLong()) { ArrayList() } +=
                         Agc(Constellation.fromAndroid(values[1].toInt()), values[2].toDouble().toLong(), values[3].toDouble())
@@ -181,6 +209,7 @@ class RecordingFile private constructor(
             return RecordingFile(
                 moments, fixes, status, headers["Status"].orEmpty(), phoneIntegrity, motionLines, baroLines,
                 hasSatellitePvt = ph != null, truth = truth,
+                motionFigures = motionFigures, accel = accel, gyro = gyro, clockPair = clockPair,
             )
         }
     }

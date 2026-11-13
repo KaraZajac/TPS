@@ -497,7 +497,7 @@ internal fun ChipCard(state: GnssEngine.State, raw: RawUi) {
             Spacer(Modifier.height(4.dp))
             Note(
                 "Save puts the recording in Download/TPS, in Google's GnssLogger format plus the chip's " +
-                    "satellite positions. It contains your position: share it only with people you trust."
+                    "satellite positions. It contains your position and how the phone moved: share it only with people you trust."
             )
         }
     }

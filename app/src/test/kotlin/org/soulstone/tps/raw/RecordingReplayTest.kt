@@ -153,6 +153,32 @@ class RecordingReplayTest {
         })
         println("motion: " + (if (motionLines.isEmpty()) "not in this recording" else motionSeen.entries.joinToString { "${it.key} ${it.value}" }) +
             "; static mode in $atRest rounds; held against suspect signals in $held rounds, holds that ended by following: ${lastFused?.released ?: 0}; measurements weighed less: $downweighted")
+        // The motion sensors themselves (dev.13 on): the stillness verdicts worked out again from
+        // them, against the figures the phone recorded at the time.
+        if (recording.accel.isNotEmpty()) {
+            val span = (recording.accel.last().tNs - recording.accel.first().tNs) * 1e-9
+            val detector = MotionDetector()
+            var ai = 0
+            var gi = 0
+            val ratios = ArrayList<Double>()
+            var same = 0
+            var judged = 0
+            for ((utc, figures) in recording.motionFigures) {
+                val at = recording.elapsedNs(utc) ?: break
+                while (ai < recording.accel.size && recording.accel[ai].tNs <= at) recording.accel[ai++].let { detector.accel(it.tNs, it.x, it.y, it.z) }
+                while (gi < recording.gyro.size && recording.gyro[gi].tNs <= at) recording.gyro[gi++].let { detector.gyro(it.tNs, it.x, it.y, it.z) }
+                val again = detector.reading(at)
+                val sd = figures.first ?: continue
+                val accelSd = again.accelSdMps2 ?: continue
+                judged++
+                ratios += accelSd / sd
+                if (again.motion == MotionDetector.classify(sd, figures.second)) same++
+            }
+            ratios.sort()
+            println("motion samples: ${recording.accel.size} accelerometer (%.1f a second), ${recording.gyro.size} gyroscope; worked out again from them, the verdict matches the phone's in $same of $judged rounds (accelerometer sd, again over the phone's: median %.2f)".format(
+                recording.accel.size / span, ratios.getOrElse(ratios.size / 2) { Double.NaN },
+            ))
+        }
         println("multipath flagged on " + moments.sumOf { m -> m.epoch.measurements.count { it.multipath == 1 } } + " of " + moments.sumOf { it.epoch.measurements.size } + " measurements")
         if (phoneIntegrity.isNotEmpty()) {
             val t0 = moments.firstOrNull()?.wallMs ?: 0L

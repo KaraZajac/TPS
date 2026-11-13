@@ -756,14 +756,42 @@ them it claims ±1–2 m while 10 m off).
   the arithmetic turned up, and the reference model has it right to 2 cm. It needs a spot of
   known height.
 
+**Held in the hand (0.3.0-dev.13).** Kara's three minutes holding the phone still (dev.12,
+22–25 dB-Hz, full tracking off: 4–10 measurements a round):
+- *At rest, told*: still 70 rounds, quiet 68, moving 42; the moving ones while handling the phone
+  (a screenshot, scrolling: accelerometer sd median 0.33 m/s², gyroscope 0.13 rad/s, between
+  quiet and walking, and overlapping a car on the road at 0.83 and 0.13). Static mode in 123
+  of the 166 rounds shown.
+- *TPS*: 4.7 m from the chip typically (95% 12.1 m), within twice their combined claims in every
+  round. The chip held its position within 0.4 m (it freezes at rest) while claiming ±11–30 m;
+  TPS moved about its own mean by 3.5 m typically, within its ±, and by 13 m while the phone was
+  handled for 25 s: the sensors said moving, so the velocity was free, and the Doppler (1–6 weak
+  rates a round, each ±1–10 m/s) read 1–2 m/s. The phone's antenna did move; the phone didn't.
+- *The Doppler's noise model holds*: at rest, by C/N0, the errors are 0.1–0.96 of the sigma TPS
+  gives them (rms), at most 1.2% beyond three.
+- *Tried and dropped*: less acceleration noise in static mode (no change: the wander is the
+  measurements' noise, within the ±); static mode unless the filter's speed is significantly
+  more than none (16 → 11 m on the recording, but a smooth ride on weak signals is caught at
+  rest, 37–79 m behind at 1–4 m/s); unless the Doppler alone shows motion, this round or over
+  the last 3 s (safe from 2 m/s, 1 m better on the recording, a 1 m/s ride 35 m behind). Kept
+  as guards: `aSmoothRideOnWeakSignalsIsNotTakenForRest`, `aHeldPhoneUnderAWeakSkyStaysWithinAFewMetres`
+  (`SyntheticSky` takes the chip's reported uncertainties apart from the noise now).
+- *What it needs*: telling a phone being handled from one being carried (steps). Recordings now
+  carry the motion sensors themselves (below) so that can be worked out on Kara's phone; the
+  replay test works the stillness verdicts out again from them, against the phone's.
+
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;
 the system's "Save as" picker on Android 8–9). TPS adds `SatPvt`
 lines, the chip's satellite positions, which GnssLogger doesn't record; the receiver gain
 (the per-measurement `AgcDb` column on every Android version, the API 33 list as `Agc`
-lines); a note when full tracking turns on or off (Android 14+); and `Integrity` lines
-when TPS's warning changes, so a recording shows what the screen said. It's how the
-decoders get checked against real phones. The file contains your position, and TPS says so.
+lines); a note when full tracking turns on or off (Android 14+); `Integrity` lines
+when TPS's warning changes, so a recording shows what the screen said; the motion verdict
+and the barometer each round (`Motion`, `Baro`); and from dev.13 the motion sensors
+themselves (`Accel`, `Gyro`: 25 a second, each the mean of a 40 ms slot of the 50 Hz stream,
+by the sensors' own time stamps, with a `# Clock:` line pairing that clock with UTC). It's
+how the decoders get checked against real phones. The file contains your position and how
+the phone moved, and TPS says so.
 
 ## Sources
 

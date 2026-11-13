@@ -155,8 +155,14 @@ class GnssEngine private constructor(context: Context) {
             val now = SystemClock.elapsedRealtimeNanos()
             val v = e.values
             when (e.sensor.type) {
-                Sensor.TYPE_ACCELEROMETER -> motion.accel(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
-                Sensor.TYPE_GYROSCOPE -> motion.gyro(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+                Sensor.TYPE_ACCELEROMETER -> {
+                    motion.accel(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+                    recorder.accel(e.timestamp, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+                }
+                Sensor.TYPE_GYROSCOPE -> {
+                    motion.gyro(now, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+                    recorder.gyro(e.timestamp, v[0].toDouble(), v[1].toDouble(), v[2].toDouble())
+                }
                 Sensor.TYPE_PRESSURE -> barometer.sample(now, v[0].toDouble())
             }
         }

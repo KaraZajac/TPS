@@ -24,6 +24,9 @@ class Sky(
     /** The chip steers its clock offset every second (as Kara's does), or leaves it be. */
     val steered: Boolean = true,
     val codeNoise: Double = 2.0,
+    /** The pseudorange's and the Doppler's uncertainty as the chip reports them (weak signals: far more). */
+    val codeSigma: Double = 3.0,
+    val rateSigma: Double = 0.3,
     /** Slow multipath: each satellite's pseudorange off by a bias of this size, metres, wandering over [multipathTauS]. */
     val multipathM: Double = 0.0,
     val multipathTauS: Double = 60.0,
@@ -162,11 +165,11 @@ object SyntheticSky {
                     OMEGA_E * (satVelocity.x * receiver.y + sat.x * receiverVelocity.y - satVelocity.y * receiver.x - sat.y * receiverVelocity.x) / Pseudoranges.C
                 val strength = sky.cn0(k, system, Math.toDegrees(el), random)
                 observations += Observation(
-                    system, eph.svid, sat, dts, pseudorange, 3.0,
+                    system, eph.svid, sat, dts, pseudorange, sky.codeSigma,
                     carrierHz = if (system == Constellation.GLONASS) 1_602.0e6 else 1_575.42e6,
                     ionoMeters = 0.0, tropoMeters = tropo,
                     satelliteVelocity = satVelocity, satelliteClockDriftMps = satDrift,
-                    rateMps = closing + DRIFT - satDrift + sky.rateBias(system) + sky.rateNoise * random.nextGaussian(), rateSigmaMps = 0.3,
+                    rateMps = closing + DRIFT - satDrift + sky.rateBias(system) + sky.rateNoise * random.nextGaussian(), rateSigmaMps = sky.rateSigma,
                     cn0DbHz = strength, isbMeters = if (sky.chipBiases) bias else null,
                 )
                 signals += SignalLevel(system, eph.svid, strength, Math.toDegrees(el))

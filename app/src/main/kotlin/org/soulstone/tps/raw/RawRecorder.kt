@@ -5,6 +5,7 @@ import android.location.GnssNavigationMessage
 import android.location.GnssStatus
 import android.location.Location
 import android.os.Build
+import android.os.SystemClock
 import java.io.BufferedWriter
 import java.io.File
 import java.text.SimpleDateFormat
@@ -16,12 +17,16 @@ import java.util.Locale
  * so a recording also opens in Google's own GNSS analysis tools. `SatPvt` lines are TPS's own
  * addition: the chip's satellite positions, which GnssLogger doesn't record (tools skip
  * line types they don't know). `Fix` lines with the provider `TPS` are TPS's own position,
- * next to the chip's (`GPS`). Used only on the GNSS thread.
+ * next to the chip's (`GPS`). `Accel` and `Gyro` lines are the motion sensors themselves, 25 a
+ * second, by the sensors' own time stamps (the phone's monotonic clock; a `# Clock:` line pairs
+ * it with UTC). Used only on the GNSS thread.
  */
-class RawRecorder(private val dir: File) {
+class RawRecorder(private val dir: File, private val elapsedNanos: () -> Long = { SystemClock.elapsedRealtimeNanos() }) {
     private var writer: BufferedWriter? = null
     private var lastFullTracking: Boolean? = null
     private var lastIntegrity: String? = null
+    private val accelSlots = SlotAverager { t, x, y, z -> line("Accel,$t,${"%.3f".format(Locale.ROOT, x)},${"%.3f".format(Locale.ROOT, y)},${"%.3f".format(Locale.ROOT, z)}") }
+    private val gyroSlots = SlotAverager { t, x, y, z -> line("Gyro,$t,${"%.4f".format(Locale.ROOT, x)},${"%.4f".format(Locale.ROOT, y)},${"%.4f".format(Locale.ROOT, z)}") }
 
     var file: File? = null
         private set
@@ -55,11 +60,18 @@ class RawRecorder(private val dir: File) {
         line("# Integrity,utcTimeMillis,Level,Check,Text")
         line("# Motion,utcTimeMillis,State,AccelSdMps2,GyroRmsRadps")
         line("# Baro,utcTimeMillis,PressureHpa")
+        line("# Accel,elapsedRealtimeNanos,XMps2,YMps2,ZMps2")
+        line("# Gyro,elapsedRealtimeNanos,XRadps,YRadps,ZRadps")
+        line("# Clock: elapsedRealtimeNanos ${elapsedNanos()} at utcTimeMillis ${System.currentTimeMillis()}")
         line("# SatPvt,utcTimeMillis,TimeNanos,Svid,ConstellationType,CarrierFrequencyHz,Flags,XEcefMeters,YEcefMeters,ZEcefMeters,UreMeters,VxEcefMps,VyEcefMps,VzEcefMps,HardwareCodeBiasMeters,TimeCorrectionMeters,ClockDriftMps,IonoDelayMeters,TropoDelayMeters,TimeOfClockSeconds,TimeOfEphemerisSeconds,IssueOfDataClock,IssueOfDataEphemeris,EphemerisSource")
     }
 
     fun stop(): File? {
         val f = file
+        if (writer != null) {
+            accelSlots.flush()
+            gyroSlots.flush()
+        }
         runCatching { writer?.flush(); writer?.close() }
         writer = null
         return f
@@ -90,6 +102,16 @@ class RawRecorder(private val dir: File) {
     fun motion(r: MotionReading) {
         if (writer == null) return
         line("Motion,${System.currentTimeMillis()},${r.motion.name},${r.accelSdMps2?.let { "%.4f".format(Locale.ROOT, it) } ?: ""},${r.gyroRmsRadps?.let { "%.4f".format(Locale.ROOT, it) } ?: ""}")
+    }
+
+    /** An accelerometer sample, m/s², at the sensor's own time stamp ([tNs], monotonic). */
+    fun accel(tNs: Long, x: Double, y: Double, z: Double) {
+        if (writer != null) accelSlots.add(tNs, x, y, z)
+    }
+
+    /** A gyroscope sample, rad/s. */
+    fun gyro(tNs: Long, x: Double, y: Double, z: Double) {
+        if (writer != null) gyroSlots.add(tNs, x, y, z)
     }
 
     /** The barometer's mean over the last second, hPa (once a measurement event). */
