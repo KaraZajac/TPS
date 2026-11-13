@@ -63,7 +63,8 @@ class OwnFixEngine {
     private var disagreeing = 0
     private val fusion = SuperPosition()
 
-    val klobuchar: Klobuchar? get() = gps.klobuchar ?: qzss.klobuchar
+    /** The broadcast ionosphere model once its page has been read, a typical one until then. */
+    val klobuchar: Klobuchar get() = gps.klobuchar ?: qzss.klobuchar ?: Klobuchar.TYPICAL
 
     fun accept(message: NavMessage) {
         navCounts[message.type] = (navCounts[message.type] ?: 0) + 1

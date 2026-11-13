@@ -14,8 +14,8 @@ android {
         applicationId = "org.soulstone.tps"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.3.0-dev.11"
+        versionCode = 16
+        versionName = "0.3.0-dev.12"
         // On-device checks of what only a real Android runtime can answer (run on an emulator).
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -29,6 +29,9 @@ android {
             // were made, so they stay out of the repo and come in only from the command line.
             val recording = providers.gradleProperty("tps.recording").orNull
             if (recording != null) it.systemProperty("tps.recording", recording)
+            // Made-up recordings whose truth is known (TruthReplayTest), colon-separated.
+            val truth = providers.gradleProperty("tps.truth").orNull
+            if (truth != null) it.systemProperty("tps.truth", truth)
         }
     }
 

@@ -360,6 +360,10 @@ org.soulstone.tps
     rotation matrix, and the clock and distance formats (v0.2)
 - **On the emulator** (e.g. the `ow36` AVD), demo sky only: layout checks and labelled
   screenshots.
+- **Against a second model** (`tools/reference`, by hand, not in CI): recordings made up by an
+  independent model, with their truth, replayed through the real pipeline (`TruthReplayTest`).
+- **Against recordings** from real phones (`RecordingReplayTest`, by hand; recordings never
+  enter the repo).
 - **On a real phone outdoors:** the actual test. Kara sideloads the CI APK. Check that
   the counts and positions match GPSTest on the same phone.
 
@@ -481,8 +485,8 @@ real pipeline (pass one with `-Ptps.recording=`; recordings never enter the repo
 
 **The solver.** Iterative weighted least squares on the pseudoranges: position plus a
 clock term per constellation; satellite clock (af0–af2, relativity, group delay), Earth
-rotation during the signal's flight, Klobuchar ionosphere (from GPS subframe 4), a
-standard troposphere, a 10° mask, C/N0 weights. At least 4 satellites per constellation.
+rotation during the signal's flight, Klobuchar ionosphere (from GPS subframe 4; a typical
+set of its numbers until that page has come), a standard troposphere, a 10° mask, C/N0 weights. At least 4 satellites per constellation.
 Results: position, offset from the chip's fix (east/north/up), residuals, DOP.
 
 **Robustness (0.3.0-dev.5)**, from Kara's recordings: far less vertical than horizontal
@@ -703,6 +707,54 @@ them it claims ±1–2 m while 10 m off).
 - The replay test also prints the time between the chip's fixes and the measurements, the
   wander at the chip's stops (once TPS has settled), and each height's wander against the
   barometer.
+
+**Audit (0.3.0-dev.12).** Kara asked whether it all computes right. Checked from three sides:
+- *Against a second model* (`tools/reference`): a forward model in Python written from the
+  interface documents, sharing no code with the app, makes up a recording whose truth is known
+  to the millimetre (real broadcast orbits of GPS, Galileo and GLONASS for a day, a receiver at
+  Old Faithful that drives off), and `TruthReplayTest` replays it through the real pipeline.
+  With no noise each second's own fix lands 2 mm from the truth (4 mm at most), the super
+  position 4 mm (4 cm at most, 2 cm in height), ground speed within 1 mm/s; a system offset
+  the chip doesn't report is learned to the millimetre and a 2 ms clock step changes nothing.
+  The same with the chip's fix at the truth, 60 m off it, or absent.
+- *One model error, fixed*: the Doppler model left out the rate of the Earth-rotation term, up
+  to 2 mm/s on the velocity, always the same way
+  (`SuperPositionTest.cleanSignalsAtRestLeaveNoSpeed`).
+- *The chip's satellite data against the public broadcast orbits* (the IGS's merged file for
+  the day of the drive): velocities and clock drifts agree to mm/s; its ionosphere delay is
+  the broadcast Klobuchar model (4 mm sd between them); its troposphere is 0.1–1 m below
+  Saastamoinen, more at low elevation; positions and clocks differ by a few metres (another
+  issue of the orbits), in line with the 2.6 m rms of lasting error per satellite in the
+  residuals.
+- *The ±*: with white noise drawn from TPS's own noise model the filter's covariance is honest.
+  With errors that last for minutes (reflections, 2 m of orbit and clock error per satellite)
+  TPS was 2–3 m off where the covariance said ±1 m: a filter can't average out what doesn't
+  change. What TPS shows is now the covariance's figure with a systematic part added in
+  quadrature, 2 m horizontal and 4 m vertical; gates and holds still go by the covariance
+  alone. Synthetic, with lasting errors: the truth within the ± in 51–58% of rounds and within
+  twice it in all. On Kara's recordings the ± rises by 0.1–0.6 m, so the ring is green in
+  fewer rounds (99 → 85 of 112, 25 → 11 of 161, 51 → 49 of 51, 870 → 857 of 892 on the drive);
+  nothing else changes. A claim under about 3 m can't be checked against the chip, only
+  against a surveyed point.
+- *No ionosphere model at all, fixed*: the chip's delay is used where it gives one, else the
+  Klobuchar model with the numbers GPS broadcasts, and those arrive only in navigation
+  messages (subframe 4, page 18, every 12.5 minutes). A phone with the chip's satellite
+  positions but neither of the two had no model: synthetic, 5.0 m too high in the morning,
+  7.6 m in the afternoon, 2.5 m at night. TPS now takes a typical set until it has better
+  (`Klobuchar.TYPICAL`: GPS's own of 1 January 2004, RTKLIB's fallback too): 0.3 m, 0.5 m and
+  2 cm in the same three (horizontally 0.4–0.6 m by day either way: the two sets' slopes
+  across the sky differ). On Kara's recordings that set would take out
+  81–100% of the delay the chip reports (1.6–3.6 m rms per satellite). Kara's phone gets the
+  chip's delay for every satellite, so nothing changes there.
+- *Kept*: the weights (elevation, C/N0, per system), compared against alternatives, and the
+  motion noise at rest.
+- *Sharper tests*: the own-fix tests' signals were rounded to whole nanoseconds as a chip's
+  are (0.3 m each), which moved the fix by up to half a metre; the remainder now goes in the
+  measurement's time offset, the fixes land within 2 cm and the limits are 0.1 m, not 0.5 m.
+  The replay test prints how many rounds the ring would be green, yellow and orange.
+- *Still open*: the height. On the drive TPS's sat about 10 m above the chip's; no error in
+  the arithmetic turned up, and the reference model has it right to 2 cm. It needs a spot of
+  known height.
 
 **Recording.** A recorder writes the raw data (GnssLogger's text format: `Raw`, `Nav`,
 `Fix`, `Status` lines); **Save** copies it to `Download/TPS` (MediaStore, no permission;

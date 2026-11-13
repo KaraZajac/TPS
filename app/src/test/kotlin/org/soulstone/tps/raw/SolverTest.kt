@@ -43,6 +43,18 @@ class SolverTest {
         assertTrue(Atmosphere.troposphere(home, Math.toRadians(10.0)) > 5 * zenith)
     }
 
+    @Test
+    fun theTypicalIonosphereIsTheNightFloorAtNightAndSeveralMetresByDay() {
+        val up = Math.toRadians(90.0)
+        // The Statue of Liberty's clocks are about five hours behind GPS time of day.
+        val night = Atmosphere.klobuchar(Klobuchar.TYPICAL, home, 0.0, up, 7 * 3600.0)      // two in the morning there
+        val day = Atmosphere.klobuchar(Klobuchar.TYPICAL, home, 0.0, up, 19 * 3600.0)       // two in the afternoon
+        assertEquals(1.5, night, 0.01)
+        assertTrue("by day $day m", day in 3.0..6.0)
+        // Three times as much through the slant near the horizon.
+        assertEquals(3.0, Atmosphere.klobuchar(Klobuchar.TYPICAL, home, 0.0, Math.toRadians(10.0), 7 * 3600.0) / night, 0.3)
+    }
+
     /** Synthetic observations from satellites at given directions, 20 200 km up. */
     private fun observations(clocks: Map<Constellation, Double>, directions: List<Pair<Double, Double>>, c: (Int) -> Constellation): List<Observation> =
         directions.mapIndexed { i, (azDeg, elDeg) ->

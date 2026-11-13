@@ -157,7 +157,9 @@ object SyntheticSky {
                 }
                 val pseudorange = range + reported + bias - Pseudoranges.C * dts + tropo + reflection +
                     sky.codeNoise * random.nextGaussian() + sky.fault(k, system, eph.svid)
-                val closing = ((satVelocity.x - receiverVelocity.x) * d.x + (satVelocity.y - receiverVelocity.y) * d.y + (satVelocity.z - receiverVelocity.z) * d.z) / r
+                // The range's rate, and the Earth-rotation term's own (a few mm/s).
+                val closing = ((satVelocity.x - receiverVelocity.x) * d.x + (satVelocity.y - receiverVelocity.y) * d.y + (satVelocity.z - receiverVelocity.z) * d.z) / r +
+                    OMEGA_E * (satVelocity.x * receiver.y + sat.x * receiverVelocity.y - satVelocity.y * receiver.x - sat.y * receiverVelocity.x) / Pseudoranges.C
                 val strength = sky.cn0(k, system, Math.toDegrees(el), random)
                 observations += Observation(
                     system, eph.svid, sat, dts, pseudorange, 3.0,

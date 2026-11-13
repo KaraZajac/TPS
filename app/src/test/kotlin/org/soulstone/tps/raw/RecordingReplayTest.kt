@@ -8,8 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.soulstone.tps.gnss.Constellation
-import org.soulstone.tps.gnss.Signal
-import org.soulstone.tps.gnss.SkySnapshot
+import org.soulstone.tps.gnss.FixQuality
 
 /**
  * Replays a raw recording made by TPS (GnssLogger format plus `SatPvt` lines) through the real
@@ -22,135 +21,20 @@ import org.soulstone.tps.gnss.SkySnapshot
  */
 class RecordingReplayTest {
 
-    private class Moment(val epoch: RawEpoch, val utcMs: Long, val elapsedMs: Long?, val wallMs: Long?)
-
     /** A shown round, for the stops: the chip's speed, TPS's position and the chip's. */
     private class Shown(val index: Int, val chipSpeedMps: Double?, val tps: Ecef, val chip: Geodetic)
-
-    private class ChipFix(
-        val utcMs: Long, val at: Geodetic, val accuracyM: Double?, val elapsedMs: Long?,
-        val speedMps: Double? = null, val bearingDeg: Double? = null,
-    )
-
-    private fun columns(header: String) = header.removePrefix("# ").split(",").drop(1).withIndex().associate { it.value to it.index }
 
     @Test
     fun superPositionOnARealRecording() {
         val path = System.getProperty("tps.recording").orEmpty()
         assumeTrue("no recording given (-Ptps.recording=…)", path.isNotBlank() && File(path).isFile)
 
-        val headers = HashMap<String, Map<String, Int>>()
-        val raw = LinkedHashMap<Long, MutableList<List<String>>>()
-        val pvt = HashMap<Triple<Long, Int, Int>, List<String>>()
-        val fixes = ArrayList<ChipFix>()
-        val status = sortedMapOf<Long, MutableList<List<String>>>()
-        // The API 33 AGC list, by the event's wall time: utcTimeMillis, ConstellationType, CarrierFrequencyHz, AgcDb.
-        val agcLines = HashMap<Long, MutableList<Agc>>()
-        // What the phone's own integrity checks showed (dev.8 on): utcTimeMillis, Level, Check, Text.
-        val phoneIntegrity = ArrayList<List<String>>()
-        // The motion sensors' verdict (dev.9 on), by wall time.
-        val motionLines = sortedMapOf<Long, Motion>()
-        // The barometer's second-by-second mean (dev.10 on), by wall time.
-        val baroLines = sortedMapOf<Long, Double>()
-        File(path).forEachLine { line ->
-            if (line.startsWith("# ")) {
-                val kind = line.removePrefix("# ").substringBefore(",")
-                if (line.count { it == ',' } > 3) headers[kind] = columns(line)
-                return@forEachLine
-            }
-            val f = line.split(",")
-            val values = f.drop(1)
-            when (f[0]) {
-                "Raw" -> raw.getOrPut(values[headers.getValue("Raw").getValue("TimeNanos")].toLong()) { ArrayList() } += values
-                "SatPvt" -> headers.getValue("SatPvt").let { h ->
-                    pvt[Triple(values[h.getValue("TimeNanos")].toLong(), values[h.getValue("ConstellationType")].toInt(), values[h.getValue("Svid")].toInt())] = values
-                }
-                // The chip's fixes only; "TPS" lines are TPS's own from the phone.
-                "Fix" -> headers.getValue("Fix").takeIf { h -> values[h.getValue("Provider")] == "GPS" }?.let { h ->
-                    fixes += ChipFix(
-                        values[h.getValue("UnixTimeMillis")].toLong(),
-                        Geodetic(
-                            values[h.getValue("LatitudeDegrees")].toDouble(),
-                            values[h.getValue("LongitudeDegrees")].toDouble(),
-                            values[h.getValue("AltitudeMeters")].toDoubleOrNull() ?: 0.0,
-                        ),
-                        values[h.getValue("AccuracyMeters")].toDoubleOrNull(),
-                        values[h.getValue("elapsedRealtimeNanos")].toLongOrNull()?.div(1_000_000),
-                        values[h.getValue("SpeedMps")].toDoubleOrNull(),
-                        values[h.getValue("BearingDegrees")].toDoubleOrNull(),
-                    )
-                }
-                "Status" -> status.getOrPut(values[headers.getValue("Status").getValue("UnixTimeMillis")].toLong()) { ArrayList() } += values
-                "Integrity" -> phoneIntegrity += values
-                // From the figures when the line has them, so today's thresholds judge older recordings too.
-                "Motion" -> motionLines[values[0].toLong()] = values.getOrNull(2)?.toDoubleOrNull()
-                    ?.let { sd -> MotionDetector.classify(sd, values.getOrNull(3)?.toDoubleOrNull()) }
-                    ?: runCatching { Motion.valueOf(values[1]) }.getOrDefault(Motion.UNKNOWN)
-                "Baro" -> values[1].toDoubleOrNull()?.let { baroLines[values[0].toLong()] = it }
-                "Agc" -> agcLines.getOrPut(values[0].toLong()) { ArrayList() } +=
-                    Agc(Constellation.fromAndroid(values[1].toInt()), values[2].toDouble().toLong(), values[3].toDouble())
-            }
-        }
-        val rh = headers.getValue("Raw")
-        val ph = headers["SatPvt"]
-        val sh = headers.getValue("Status")
-        fun d(v: List<String>, k: String) = v[rh.getValue(k)].toDoubleOrNull()
-
-        val moments = raw.map { (timeNanos, rows) ->
-            val r0 = rows.first()
-            val clock = RawClock(
-                timeNanos = timeNanos,
-                fullBiasNanos = r0[rh.getValue("FullBiasNanos")].toLongOrNull(),
-                biasNanos = d(r0, "BiasNanos") ?: 0.0,
-                discontinuityCount = r0[rh.getValue("HardwareClockDiscontinuityCount")].toInt(),
-                leapSecond = r0[rh.getValue("LeapSecond")].toIntOrNull(),
-            )
-            val measurements = rows.map { v ->
-                val ct = v[rh.getValue("ConstellationType")].toInt()
-                val svid = v[rh.getValue("Svid")].toInt()
-                val p = ph?.let { h -> pvt[Triple(timeNanos, ct, svid)]?.let { it to h } }
-                RawMeasurement(
-                    constellation = Constellation.fromAndroid(ct),
-                    svid = svid,
-                    timeOffsetNanos = d(v, "TimeOffsetNanos") ?: 0.0,
-                    state = v[rh.getValue("State")].toInt(),
-                    receivedSvTimeNanos = v[rh.getValue("ReceivedSvTimeNanos")].toLong(),
-                    receivedSvTimeUncertaintyNanos = v[rh.getValue("ReceivedSvTimeUncertaintyNanos")].toLong(),
-                    cn0DbHz = d(v, "Cn0DbHz") ?: 0.0,
-                    pseudorangeRateMps = d(v, "PseudorangeRateMetersPerSecond") ?: 0.0,
-                    pseudorangeRateUncertaintyMps = d(v, "PseudorangeRateUncertaintyMetersPerSecond") ?: 0.0,
-                    carrierHz = d(v, "CarrierFrequencyHz"),
-                    fullInterSignalBiasNanos = d(v, "FullInterSignalBiasNanos"),
-                    multipath = v[rh.getValue("MultipathIndicator")].toIntOrNull() ?: 0,
-                    pvt = p?.let { (pv, h) ->
-                        fun g(k: String) = pv[h.getValue(k)].toDoubleOrNull()
-                        ChipPvt(
-                            flags = pv[h.getValue("Flags")].toInt(),
-                            position = Ecef(g("XEcefMeters")!!, g("YEcefMeters")!!, g("ZEcefMeters")!!),
-                            positionUreMeters = g("UreMeters") ?: 0.0,
-                            velocity = Ecef(g("VxEcefMps")!!, g("VyEcefMps")!!, g("VzEcefMps")!!),
-                            hardwareCodeBiasMeters = g("HardwareCodeBiasMeters") ?: 0.0,
-                            timeCorrectionMeters = g("TimeCorrectionMeters")!!,
-                            clockDriftMps = g("ClockDriftMps") ?: 0.0,
-                            ionoMeters = g("IonoDelayMeters"),
-                            tropoMeters = g("TropoDelayMeters"),
-                        )
-                    },
-                )
-            }
-            val gpsNs = clock.fullBiasNanos?.let { timeNanos - it - Math.round(clock.biasNanos) } ?: 0L
-            val utcMs = gpsNs / 1_000_000 + 315_964_800_000L - (clock.leapSecond ?: 18) * 1000L
-            // The AGC list when the chip filled it, else the per-measurement field, as the app reads them.
-            val listed = r0[rh.getValue("utcTimeMillis")].toLongOrNull()?.let { agcLines[it] }.orEmpty()
-            val perSignal = AgcBands.fromSignals(rows.mapNotNull { v ->
-                d(v, "AgcDb")?.let { Triple(Constellation.fromAndroid(v[rh.getValue("ConstellationType")].toInt()), d(v, "CarrierFrequencyHz"), it) }
-            })
-            Moment(
-                RawEpoch(clock, measurements, listed.ifEmpty { perSignal }, agcFromSignals = listed.isEmpty() && perSignal.isNotEmpty()), utcMs,
-                elapsedMs = r0[rh.getValue("ChipsetElapsedRealtimeNanos")].toLongOrNull()?.div(1_000_000),
-                wallMs = r0[rh.getValue("utcTimeMillis")].toLongOrNull(),
-            )
-        }
+        val recording = File(path).useLines { RecordingFile.read(it) }
+        val moments = recording.moments
+        val fixes = recording.fixes
+        val phoneIntegrity = recording.phoneIntegrity
+        val motionLines = recording.motion
+        val baroLines = recording.pressure
 
         val engine = OwnFixEngine()
         val fused = ArrayList<Double>()
@@ -187,33 +71,19 @@ class RecordingReplayTest {
             motionSeen.merge(motion, 1, Int::plus)
             // The barometer's reading at this round, if it's recent.
             val pressure = m.wallMs?.let { w -> baroLines.headMap(w + 1).entries.lastOrNull()?.takeIf { w - it.key <= 2_000 }?.value }
-            val nearest = fixes.minByOrNull { kotlin.math.abs(it.utcMs - m.utcMs) }?.takeIf { kotlin.math.abs(it.utcMs - m.utcMs) <= 600 }
+            val nearest = recording.fixNear(m.utcMs)
             // Where the chip's fix puts the phone at the measurements' moment, as the app has it.
             val chip = nearest?.let { Geo.along(it.at, it.utcMs, it.speedMps, it.bearingDeg, m.utcMs) }
             nearest?.let { chipLeads += (m.utcMs - it.utcMs) / 1_000.0 }
-            val statusRows = status.headMap(m.utcMs + 1).entries.lastOrNull()?.value
             // The chip's sky at that moment, for the orbit check.
-            val sky = statusRows?.let { rows ->
-                SkySnapshot.of(rows.map { v ->
-                    Signal(
-                        Constellation.fromAndroid(v[sh.getValue("ConstellationType")].toInt()), v[sh.getValue("Svid")].toInt(),
-                        v[sh.getValue("Cn0DbHz")].toFloat(), v[sh.getValue("ElevationDegrees")].toFloat(), v[sh.getValue("AzimuthDegrees")].toFloat(),
-                        usedInFix = v[sh.getValue("UsedInFix")] == "1",
-                    )
-                })
-            }
+            val sky = recording.skyAt(m.utcMs)
             val report = engine.solve(m.epoch, chip, sky, nearest?.accuracyM, motion, pressure)
             if (chip != null) report.combined?.let { snapshot += Solver.offset(chip, it.ecef).let { e -> hypot(e[0], e[1]) } }
             // The integrity checks, fed as the app feeds them.
             val integrity = monitor.update(
                 IntegrityInput(
                     elapsedS = (m.elapsedMs ?: (m.epoch.clock.timeNanos / 1_000_000)) / 1_000.0,
-                    signals = statusRows.orEmpty().map { v ->
-                        SignalLevel(
-                            Constellation.fromAndroid(v[sh.getValue("ConstellationType")].toInt()), v[sh.getValue("Svid")].toInt(),
-                            v[sh.getValue("Cn0DbHz")].toDouble(), v[sh.getValue("ElevationDegrees")].toDouble(),
-                        )
-                    }.filter { it.cn0DbHz > 0 },
+                    signals = recording.levelsAt(m.utcMs),
                     agc = m.epoch.agc,
                     motion = motion,
                     fused = report.fused,
@@ -272,6 +142,8 @@ class RecordingReplayTest {
         println("integrity: worst $worst" + findings.joinToString("") { "\n  $it" })
         println("claimed accuracy: " + stats(claimed) + "; consistency (NIS, ~1 when the noise model is right): " +
             nis.sorted().let { v -> if (v.isEmpty()) "none" else "median %.2f, mean %.2f".format(v[v.size / 2], v.average()) })
+        // The ring around the sky goes by this claim (green at ±5 m or better, yellow to ±15 m).
+        println("ring: green in ${claimed.count { it <= FixQuality.GOOD_M }}, yellow in ${claimed.count { it > FixQuality.GOOD_M && it <= FixQuality.FAIR_M }}, orange in ${claimed.count { it > FixQuality.FAIR_M }} rounds shown")
         println("NIS by system: " + nisBySystem.entries.sortedBy { it.key.ordinal }.joinToString { (c, v) -> "%s mean %.2f (n=%d)".format(c.displayName, v.average(), v.size) } +
             "; Doppler mean " + (if (rateNis.isEmpty()) "none" else "%.2f".format(rateNis.average())))
         println("code minus Doppler (~0 for an honest chip): " + lastFused?.codeMinusDopplerMps.orEmpty().entries.sortedBy { it.key.ordinal }
@@ -320,7 +192,7 @@ class RecordingReplayTest {
         assertTrue("false alarm: $findings", worst == Severity.OK)
         // Whatever TPS shows, outdoors or in, must keep within what it claims.
         assertTrue("TPS outside its claims in ${withinClaims.count { !it }} of ${withinClaims.size} rounds", withinClaims.count { !it } <= withinClaims.size / 20)
-        if (ph == null || fixes.isEmpty()) {
+        if (!recording.hasSatellitePvt || fixes.isEmpty()) {
             println("(no SatPvt or Fix lines: TPS's own position can't be checked on this one)")
             return
         }

@@ -30,11 +30,14 @@ class OwnFixTest {
             tx = receiveTow - range / Pseudoranges.C
             sat = Orbits.state(eph, tx).position
         }
-        val el = Math.toDegrees(Geo.azEl(truth, truthEcef, sat).second)
+        val (az, elevation) = Geo.azEl(truth, truthEcef, sat)
+        val el = Math.toDegrees(elevation)
         if (el < 15) return null
-        val tropo = Atmosphere.troposphere(truth, Math.toRadians(el))
-        // The satellite stamps its own time; the troposphere delays the signal on the way down.
-        val svTime = tx + Orbits.clockError(eph, tx) - tropo / Pseudoranges.C
+        val tropo = Atmosphere.troposphere(truth, elevation)
+        // No page with the broadcast ionosphere model here, so TPS must take the typical one.
+        val iono = Atmosphere.klobuchar(Klobuchar.TYPICAL, truth, az, elevation, receiveTow)
+        // The satellite stamps its own time; the ionosphere and the troposphere delay the signal on the way down.
+        val svTime = tx + Orbits.clockError(eph, tx) - (tropo + iono) / Pseudoranges.C
         return svTime to el
     }
 
@@ -51,7 +54,8 @@ class OwnFixTest {
         )
         val measurements = sats.map { (eph, svTime) ->
             RawMeasurement(
-                constellation = eph.constellation, svid = eph.svid, timeOffsetNanos = 0.0,
+                // The chip reports whole nanoseconds (0.3 m); what's left over goes in the measurement's own time offset.
+                constellation = eph.constellation, svid = eph.svid, timeOffsetNanos = Math.round(svTime * 1e9) - svTime * 1e9,
                 state = MeasurementState.CODE_LOCK or MeasurementState.TOW_DECODED,
                 receivedSvTimeNanos = Math.round(svTime * 1e9), receivedSvTimeUncertaintyNanos = 10,
                 cn0DbHz = 42.0, pseudorangeRateMps = 0.0, carrierHz = 1575.42e6,
@@ -89,12 +93,12 @@ class OwnFixTest {
             assertNotNull("$system solution", r.solution)
             val s = r.solution!!
             val error = (s.ecef - truthEcef).norm()
-            assertTrue("$system off by $error m", error < 0.5)
-            assertEquals("$system clock", receiverClock * Pseudoranges.C, s.clocks.getValue(system), 0.5)
+            assertTrue("$system off by $error m", error < 0.1)
+            assertEquals("$system clock", receiverClock * Pseudoranges.C, s.clocks.getValue(system), 0.1)
         }
         val combined = report.combined!!
         println("own fixes: " + report.systems.joinToString { "${it.constellation} ${it.withOrbit} sats ${"%.3f".format((it.solution!!.ecef - truthEcef).norm())} m" } + ", combined ${"%.3f".format((combined.ecef - truthEcef).norm())} m")
-        assertTrue("combined off by ${(combined.ecef - truthEcef).norm()} m", (combined.ecef - truthEcef).norm() < 0.5)
+        assertTrue("combined off by ${(combined.ecef - truthEcef).norm()} m", (combined.ecef - truthEcef).norm() < 0.1)
         assertEquals(gpsCount + galCount, combined.satellites.size)
     }
 

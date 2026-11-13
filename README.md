@@ -51,6 +51,8 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   fixes wandered 18 m and 79 m. It needs raw measurements and orbits (below). It takes
   over only once settled (10 seconds, ±15 m or better), holds its position through up to
   30 s of lost or jammed signal (saying so), and starts from the chip's fix when there is one.
+  The ± it shows is the filter's own uncertainty with 2 m (4 m in height) added for the errors
+  no filter averages out: orbits, the atmosphere, reflections.
   Measurements well off the fit count for less. With the phone at rest or steady (held still,
   or in a vehicle at a stop; its motion sensors, no permission needed) the velocity is held at
   zero, so the position wanders less and the height settles; at rest the position also holds
@@ -147,6 +149,10 @@ satellite data at all.
 ./gradlew :app:assembleDebug        # app/build/outputs/apk/debug/app-debug.apk
 ./gradlew :app:testDebugUnitTest    # GNSS model, NMEA, DOP, geohash, waypoints, compass math, formats
 ```
+
+[`tools/reference`](tools/reference) holds a second, independent model of the maths (Python,
+written from the interface documents) that makes up recordings whose truth is known, to replay
+TPS against.
 
 JDK 17 or newer and the Android SDK (compileSdk 37). The emulator's GNSS invents a few
 GPS satellites with no position, so turn on **Settings → Demo sky** to see a full sky

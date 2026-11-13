@@ -17,7 +17,11 @@ data class FusedFix(
     val velocityEast: Double,
     val velocityNorth: Double,
     val velocityUp: Double,
-    /** About 68% confidence, from the filter's covariance, metres. */
+    /**
+     * About 68% confidence, metres: the filter's covariance (how well this round's and earlier
+     * rounds' noise has averaged out), with the errors no averaging removes added to it
+     * ([SuperPosition.SYSTEMATIC_HORIZONTAL_M], [SuperPosition.SYSTEMATIC_VERTICAL_M]).
+     */
     val horizontalAccuracyM: Double,
     val verticalAccuracyM: Double,
     /** Satellites whose pseudorange went into the latest update. */
@@ -499,7 +503,12 @@ class SuperPosition(private val robust: Boolean = true) {
             val rate = o.rateMps
             val rateSigma = o.rateSigmaMps
             if (vs != null && rate != null && rateSigma != null) {
-                val closing = (vs.x - x[3]) * u[0] + (vs.y - x[4]) * u[1] + (vs.z - x[5]) * u[2]
+                // The range's rate, with the Earth-rotation (Sagnac) term's own rate: a few mm/s,
+                // the same way for a satellite's whole pass, so it would end up in the velocity.
+                // The atmosphere's delay changes too as a satellite climbs or sinks (about 2 mm/s,
+                // 1 cm/s at the mask): left out, far below the Doppler's noise (MIN_RATE_SIGMA).
+                val closing = (vs.x - x[3]) * u[0] + (vs.y - x[4]) * u[1] + (vs.z - x[5]) * u[2] +
+                    OMEGA_E * (vs.x * receiver.y + o.satellite.x * x[4] - vs.y * receiver.x - o.satellite.y * x[3]) / Pseudoranges.C
                 val hr = DoubleArray(N)
                 hr[3] = -u[0]; hr[4] = -u[1]; hr[5] = -u[2]
                 hr[DRIFT] = 1.0
@@ -954,6 +963,7 @@ class SuperPosition(private val robust: Boolean = true) {
             for (i in 0 until 3) for (j in 0 until 3) s += a[i] * p[i][j] * a[j]
             return max(s, 0.0)
         }
+        // The filter's own figures: what it goes by to settle, to hold and to weigh its height.
         val horizontal = sqrt(variance(east) + variance(north))
         val vertical = sqrt(variance(up))
         val since = lastT - lastUpdateT
@@ -976,8 +986,8 @@ class SuperPosition(private val robust: Boolean = true) {
             velocityEast = v[0],
             velocityNorth = v[1],
             velocityUp = v[2],
-            horizontalAccuracyM = horizontal,
-            verticalAccuracyM = vertical,
+            horizontalAccuracyM = hypot(horizontal, SYSTEMATIC_HORIZONTAL_M),
+            verticalAccuracyM = hypot(vertical, SYSTEMATIC_VERTICAL_M),
             satellites = lastSatellites,
             systems = lastSystems,
             rejected = lastRejected,
@@ -1008,7 +1018,8 @@ class SuperPosition(private val robust: Boolean = true) {
             lastReleaseMoveM = lastReleaseMoveM,
             downweighted = lastDownweighted,
             baroHeightM = baro?.first,
-            baroHeightAccuracyM = baro?.second,
+            // The barometer carries the height's changes, not its level: that is still the GNSS height's.
+            baroHeightAccuracyM = baro?.second?.let { hypot(it, SYSTEMATIC_VERTICAL_M) },
         )
     }
 
@@ -1056,6 +1067,18 @@ class SuperPosition(private val robust: Boolean = true) {
             Constellation.GLONASS to 2.0,
         )
         private const val RANGE_SIGMA_SCALE = 0.6
+        /**
+         * The errors that no averaging removes, metres (68%): each satellite's orbit and clock,
+         * what the ionosphere model leaves, the phone's own delay per signal, reflections that
+         * stay while the phone rests. The filter takes every round's errors as new ones, so its
+         * covariance alone promises a metre or less after a minute in a good sky. Measured on a
+         * drive, the errors that stay with a satellite for minutes are 2.6 m (rms); against a
+         * made-up truth with such errors TPS was 2 to 3 m off (5 m in height) where the
+         * covariance said ±1 m. Added in quadrature to the figures TPS shows, not used inside
+         * the filter: they don't change where the position is, only how sure TPS says it is.
+         */
+        const val SYSTEMATIC_HORIZONTAL_M = 2.0
+        const val SYSTEMATIC_VERTICAL_M = 4.0
         /** A cold start from a snapshot is redone from the chip's fix once the chip is this sure. */
         private const val LATE_START_ACCURACY_M = 20.0
         private const val WEAK_CN0 = 30.0

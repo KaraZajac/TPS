@@ -33,7 +33,8 @@ class OwnFixChipTest {
         )
     }
 
-    private class Sat(val system: Constellation, val svid: Int, val svTimeNanos: Long, val pvt: ChipPvt, val az: Double, val el: Double)
+    /** [offsetNanos]: the chip reports whole nanoseconds (0.3 m); what's left over goes in the measurement's own time offset. */
+    private class Sat(val system: Constellation, val svid: Int, val svTimeNanos: Long, val pvt: ChipPvt, val az: Double, val el: Double, val offsetNanos: Double)
 
     /** The signal from [eph] as the chip reports it, with the chip's position and clock for it; null below 15°. */
     private fun sat(system: Constellation, eph: KeplerEphemeris, source: Int = EphemerisSource.SERVER_LONG_TERM): Sat? {
@@ -48,9 +49,11 @@ class OwnFixChipTest {
         val (az, el) = Geo.azEl(truth, truthEcef, state.position)
         if (Math.toDegrees(el) < 15) return null
         val tropo = Atmosphere.troposphere(truth, el)
+        // The delay the chip reports; with an orbit of its own and no broadcast model read, TPS takes the same typical one.
+        val iono = Atmosphere.klobuchar(Klobuchar.TYPICAL, truth, az, el, receiveTow)
         val clock = Orbits.clockError(eph, tx)
-        // The satellite stamps its own time; the troposphere delays the signal on the way down.
-        val svTowSeconds = tx + clock - tropo / Pseudoranges.C
+        // The satellite stamps its own time; the ionosphere and the troposphere delay the signal on the way down.
+        val svTowSeconds = tx + clock - (tropo + iono) / Pseudoranges.C
         val svTimeNanos = if (system == Constellation.GLONASS) {
             // GLONASS stamps Moscow time of day: GPS time, less the leap seconds, plus three hours.
             Math.floorMod(Math.round(svTowSeconds * 1e9) + Pseudoranges.GLO_OFFSET_NS - leapSeconds * 1_000_000_000L, Pseudoranges.DAY_NS)
@@ -61,9 +64,9 @@ class OwnFixChipTest {
             flags = ChipPvtParser.HAS_POSITION_VELOCITY_CLOCK or ChipPvtParser.HAS_IONO or ChipPvtParser.HAS_TROPO,
             position = state.position, positionUreMeters = 1.0, velocity = Ecef(0.0, 0.0, 0.0),
             hardwareCodeBiasMeters = 0.0, timeCorrectionMeters = clock * Pseudoranges.C, clockDriftMps = 0.0,
-            ionoMeters = 0.0, tropoMeters = tropo, ephemerisSource = source,
+            ionoMeters = iono, tropoMeters = tropo, ephemerisSource = source,
         )
-        return Sat(system, eph.svid, svTimeNanos, pvt, Math.toDegrees(az), Math.toDegrees(el))
+        return Sat(system, eph.svid, svTimeNanos, pvt, Math.toDegrees(az), Math.toDegrees(el), Math.round(svTowSeconds * 1e9) - svTowSeconds * 1e9)
     }
 
     private fun epoch(sats: List<Sat>): RawEpoch {
@@ -79,7 +82,7 @@ class OwnFixChipTest {
         return RawEpoch(clock, sats.map { s ->
             val glonass = s.system == Constellation.GLONASS
             RawMeasurement(
-                constellation = s.system, svid = s.svid, timeOffsetNanos = 0.0,
+                constellation = s.system, svid = s.svid, timeOffsetNanos = s.offsetNanos,
                 state = MeasurementState.CODE_LOCK or if (glonass) MeasurementState.GLO_TOD_DECODED else MeasurementState.TOW_DECODED,
                 receivedSvTimeNanos = s.svTimeNanos, receivedSvTimeUncertaintyNanos = 10,
                 cn0DbHz = 40.0, pseudorangeRateMps = 0.0, carrierHz = if (glonass) 1_602.5625e6 else 1575.42e6,
@@ -117,12 +120,12 @@ class OwnFixChipTest {
             assertEquals("$system from the chip", r.withOrbit, r.fromChip)
             assertNotNull("$system solution", r.solution)
             val error = (r.solution!!.ecef - truthEcef).norm()
-            assertTrue("$system off by $error m", error < 0.5)
-            assertEquals("$system clock", receiverClock * Pseudoranges.C, r.solution.clocks.getValue(system), 0.5)
+            assertTrue("$system off by $error m", error < 0.1)
+            assertEquals("$system clock", receiverClock * Pseudoranges.C, r.solution.clocks.getValue(system), 0.1)
         }
         val combined = report.combined!!
         println("own fixes from the chip's positions: " + report.systems.joinToString { "${it.constellation} ${it.withOrbit} sats ${"%.3f".format((it.solution!!.ecef - truthEcef).norm())} m" } + ", combined ${"%.3f".format((combined.ecef - truthEcef).norm())} m")
-        assertTrue((combined.ecef - truthEcef).norm() < 0.5)
+        assertTrue((combined.ecef - truthEcef).norm() < 0.1)
         assertEquals(sats.size, combined.satellites.size)
     }
 
@@ -134,7 +137,7 @@ class OwnFixChipTest {
             val s = sat(Constellation.GPS, eph) ?: continue
             LnavEncoder.subframes(eph, tow = 345_000).forEach { engine.accept(NavMessage(NavType.GPS_L1CA, eph.svid, 0, 0, 1, it)) }
             // The chip's position is 2 km off; TPS's decoded orbit must be the one used.
-            sats += Sat(s.system, s.svid, s.svTimeNanos, s.pvt.copy(position = Ecef(s.pvt.position.x + 2_000.0, s.pvt.position.y, s.pvt.position.z)), s.az, s.el)
+            sats += Sat(s.system, s.svid, s.svTimeNanos, s.pvt.copy(position = Ecef(s.pvt.position.x + 2_000.0, s.pvt.position.y, s.pvt.position.z)), s.az, s.el, s.offsetNanos)
         }
         sats += SyntheticOrbits.galileo().mapNotNull { sat(Constellation.GALILEO, it, EphemerisSource.DEMODULATED) }
 
@@ -143,8 +146,8 @@ class OwnFixChipTest {
         val galileo = report.systems.first { it.constellation == Constellation.GALILEO }
         assertEquals(0, gps.fromChip)
         assertEquals(galileo.withOrbit, galileo.fromChip)
-        assertTrue((gps.solution!!.ecef - truthEcef).norm() < 0.5)
-        assertTrue((report.combined!!.ecef - truthEcef).norm() < 0.5)
+        assertTrue((gps.solution!!.ecef - truthEcef).norm() < 0.1)
+        assertTrue((report.combined!!.ecef - truthEcef).norm() < 0.1)
         assertEquals(mapOf(EphemerisSource.DEMODULATED to galileo.withOrbit), report.chipOrbitSources)
     }
 
@@ -161,9 +164,9 @@ class OwnFixChipTest {
     fun impossibleChipPositionsAreLeftOut() {
         val sats = visible()
         val bad = sats.first()
-        val broken = sats.map { if (it === bad) Sat(it.system, it.svid, it.svTimeNanos, it.pvt.copy(position = Ecef(1.0e6, 0.0, 0.0)), it.az, it.el) else it }
+        val broken = sats.map { if (it === bad) Sat(it.system, it.svid, it.svTimeNanos, it.pvt.copy(position = Ecef(1.0e6, 0.0, 0.0)), it.az, it.el, it.offsetNanos) else it }
         val report = OwnFixEngine().solve(epoch(broken), truth, sky = null)
         assertEquals(1, report.chipOrbitsDropped)
-        assertTrue((report.combined!!.ecef - truthEcef).norm() < 0.5)
+        assertTrue((report.combined!!.ecef - truthEcef).norm() < 0.1)
     }
 }

@@ -32,7 +32,22 @@ class Bits(private val bytes: ByteArray) {
 }
 
 /** The ionosphere model GPS broadcasts in subframe 4, page 18. */
-data class Klobuchar(val alpha: DoubleArray, val beta: DoubleArray)
+data class Klobuchar(val alpha: DoubleArray, val beta: DoubleArray) {
+    companion object {
+        /**
+         * A typical set (GPS's own of 1 January 2004, RTKLIB's fallback too), for when the phone
+         * has neither the chip's delay nor the broadcast page yet (it comes every 12.5 minutes,
+         * and only on phones that hand over navigation messages). The model's night-time part
+         * (1.5 m overhead, three times that near the horizon) doesn't depend on the set, and by
+         * day a typical set still takes most of the delay out; none at all leaves it all in, the
+         * same way for every satellite and more for the low ones: the height reads some 5 m high.
+         */
+        val TYPICAL = Klobuchar(
+            doubleArrayOf(0.1118e-7, -0.7451e-8, -0.5961e-7, 0.1192e-6),
+            doubleArrayOf(0.1167e6, -0.2294e6, -0.1311e6, 0.1049e7),
+        )
+    }
+}
 
 /**
  * GPS (and QZSS) L1 C/A legacy navigation message (LNAV), IS-GPS-200.

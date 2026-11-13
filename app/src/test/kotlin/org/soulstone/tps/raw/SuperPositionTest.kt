@@ -32,6 +32,16 @@ class SuperPositionTest {
     }
 
     @Test
+    fun cleanSignalsAtRestLeaveNoSpeed() {
+        // Without noise, what's left is the model's own error: the Earth-rotation term's rate
+        // alone, left out of the Doppler model, shows as a steady speed of some mm/s.
+        val rounds = SyntheticSky.filter(Sky(codeNoise = 0.0, rateNoise = 0.0), 120).drop(60)
+        val speed = rounds.maxOf { it.first!!.speedMps }
+        val climb = rounds.maxOf { abs(it.first!!.velocityUp) }
+        assertTrue("speed $speed m/s, climb $climb m/s", speed < 1e-4 && climb < 1e-4)
+    }
+
+    @Test
     fun learnsAGlonassOffsetTheChipDoesntReport() {
         val rounds = SyntheticSky.filter(Sky(chipBiases = false), 60)
         val f = rounds.last().first!!
