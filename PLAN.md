@@ -705,8 +705,9 @@ them it claims ±1–2 m while 10 m off).
   once and held until the place could have been reached (16 s), then followed with the
   caution; the honest train triggers nothing.
 - The replay test also prints the time between the chip's fixes and the measurements, the
-  wander at the chip's stops (once TPS has settled), and each height's wander against the
-  barometer.
+  wander at the chip's stops (once TPS has settled, less a stop's last 3 s: the chip keeps its
+  fix still for a few seconds after moving off, so those seconds are the car pulling away, not
+  TPS wandering), and each height's wander against the barometer.
 
 **Audit (0.3.0-dev.12).** Kara asked whether it all computes right. Checked from three sides:
 - *Against a second model* (`tools/reference`): a forward model in Python written from the

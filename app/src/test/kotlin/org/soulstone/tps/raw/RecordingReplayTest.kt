@@ -188,7 +188,10 @@ class RecordingReplayTest {
         }
         println("TPS within twice its and the chip's combined claims: ${withinClaims.count { it }} of ${withinClaims.size} rounds shown")
         // Stops: the chip under 0.3 m/s for 8 shown rounds in a row, once TPS has settled (30 s
-        // after its first position). How far each wandered meanwhile.
+        // after its first position). How far each wandered meanwhile. The chip keeps its fix still
+        // for a few seconds after moving off (a drive of 14 November: TPS at 2.6, 5.7 and 8.2 m/s
+        // while the chip still said 0), so a stop's last seconds are the car pulling away, not
+        // TPS wandering: they're left out.
         val stops = ArrayList<List<Shown>>()
         var run = ArrayList<Shown>()
         for (r in shown) {
@@ -196,17 +199,17 @@ class RecordingReplayTest {
             if (stopped && run.isNotEmpty() && r.index == run.last().index + 1) {
                 run += r
             } else {
-                if (run.size >= 8) stops += run
+                if (run.size >= 8) stops += run.dropLast(CHIP_RELEASE_ROUNDS)
                 run = if (stopped) arrayListOf(r) else ArrayList()
             }
         }
-        if (run.size >= 8) stops += run
+        if (run.size >= 8) stops += run.dropLast(CHIP_RELEASE_ROUNDS)
         if (stops.isNotEmpty()) {
             fun wander(s: List<Shown>, of: (Shown) -> Ecef) = s.maxOf { r -> Solver.offset(Geo.toGeodetic(of(s.first())), of(r)).let { hypot(it[0], it[1]) } }
             val tpsWander = stops.map { s -> wander(s) { it.tps } }.sorted()
             val chipWander = stops.map { s -> wander(s) { Geo.toEcef(it.chip) } }.sorted()
             println(
-                "stops (the chip under 0.3 m/s for 8 s or more, TPS settled): %d, %d s; TPS wandered up to %.1f m (median of stops; worst %.1f m), the chip %.1f m"
+                "stops (the chip under 0.3 m/s for 8 s or more, TPS settled; less the last $CHIP_RELEASE_ROUNDS s): %d, %d s; TPS wandered up to %.1f m (median of stops; worst %.1f m), the chip %.1f m"
                     .format(stops.size, stops.sumOf { it.size }, tpsWander[tpsWander.size / 2], tpsWander.last(), chipWander[chipWander.size / 2])
             )
         }
@@ -239,5 +242,10 @@ class RecordingReplayTest {
         val sorted = fused.sorted()
         assertTrue("median ${sorted[sorted.size / 2]} m (chip claims ±$chipClaim m)", sorted[sorted.size / 2] < max(6.0, 0.75 * chipClaim))
         assertTrue("95% ${sorted[(sorted.size * 0.95).toInt()]} m (chip claims ±$chipClaim m)", sorted[(sorted.size * 0.95).toInt()] < max(15.0, 1.5 * chipClaim))
+    }
+
+    private companion object {
+        /** Seconds the chip takes to let go of a stop once the car moves off. */
+        const val CHIP_RELEASE_ROUNDS = 3
     }
 }
