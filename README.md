@@ -91,7 +91,7 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   the circle.
 - **The circle turns with the phone** (heading-up), so the triangle points the way to
   walk. Turn **Turn with the phone** off in Settings for north-up.
-- **Own fixes** (in progress, v0.3): on phones that hand apps raw measurements, TPS
+- **Own fixes**: on phones that hand apps raw measurements, TPS
   computes its own positions: the super position, plus each second on its own per system
   and from all of them, plotted around the chip's fix. A different answer from the chip, or from another system, is a cross-check
   against spoofing. TPS gets the orbits by decoding the satellites' navigation messages
@@ -99,9 +99,11 @@ It reads the phone's GNSS chip directly, and nothing leaves the phone.
   satellite positions the chip computes: Android makes the getter system-only, but every
   measurement carries the data in its public serialized form, and TPS reads it from there.
 - **CHIP card**: the GNSS hardware, what it can do (raw measurements, navigation
-  messages, satellite positions, carrier phase…), the signals it supports, and a
-  **raw-data recorder** that writes Google's GnssLogger format (plus the chip's satellite
-  positions) and saves the file to `Download/TPS`.
+  messages, satellite positions, carrier phase…), the signals it supports, a **Full
+  tracking** switch (raw data every second instead of the chip's duty cycle, for more
+  battery), and a **raw-data recorder** that writes Google's GnssLogger format (plus the
+  chip's satellite positions, the barometer and the motion sensors) and saves the file to
+  `Download/TPS`.
 - **Constellations sheet** (tap the circle): all seven systems, each with who runs it,
   satellites in view and used, its bands, and a row per satellite. A POSITION card has
   the rest: both coordinate formats, geohash, ellipsoid and sea-level height,
@@ -147,7 +149,7 @@ satellite data at all.
 
 ```sh
 ./gradlew :app:assembleDebug        # app/build/outputs/apk/debug/app-debug.apk
-./gradlew :app:testDebugUnitTest    # GNSS model, NMEA, DOP, geohash, waypoints, compass math, formats
+./gradlew :app:testDebugUnitTest    # GNSS model, own fixes, integrity, NMEA, DOP, geohash, waypoints, compass, formats
 ```
 
 [`tools/reference`](tools/reference) holds a second, independent model of the maths (Python,
